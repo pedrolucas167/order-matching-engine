@@ -10,59 +10,113 @@ import (
 )
 
 type MatchingEngine struct {
-	books       map[string]*OrderBook
-	bookMu      sync.RWMutex
-	stopOrders  map[string][]*Order
-	stopMu      sync.RWMutex
-	riskManager *RiskManager
-	tradeChan   chan *Trade
-	orderChan   chan *Order
-	orderPool   *sync.Pool
-	tradesProcessed atomic.Uint64
-	ordersProcessed atomic.Uint64
+	books             map[string]*OrderBook
+	stopOrders        map[string][]*Order
+	riskManager       *RiskManager
+	tradeChan         chan *Trade
+	commandChan       chan func()
+	stop              chan struct{}
+	done              chan struct{}
+	closeOnce         sync.Once
+	pendingTrades     []*Trade
+	pendingTradeCount atomic.Int64
+	tradeBacklogLimit int64
+	tradesProcessed   atomic.Uint64
+	ordersProcessed   atomic.Uint64
 }
 
-// NewMatchingEngine creates a new matching engine
 func NewMatchingEngine(orderBufferSize, tradeBufferSize int) *MatchingEngine {
 	me := &MatchingEngine{
 		books:       make(map[string]*OrderBook),
 		stopOrders:  make(map[string][]*Order),
 		riskManager: NewRiskManager(),
 		tradeChan:   make(chan *Trade, tradeBufferSize),
-		orderChan:   make(chan *Order, orderBufferSize),
-		orderPool: &sync.Pool{
-			New: func() interface{} {
-				return &Order{}
-			},
-		},
+		commandChan: make(chan func(), orderBufferSize),
+		stop:        make(chan struct{}),
+		done:        make(chan struct{}),
 	}
-
-	// Start the matching loop
+	me.tradeBacklogLimit = int64(tradeBufferSize)
+	if me.tradeBacklogLimit < 1 {
+		me.tradeBacklogLimit = 1
+	}
 	go me.matchingLoop()
-
-	// Start the stop order monitoring loop
-	go me.stopOrderMonitor()
-
 	return me
 }
 
-// SubmitOrder submits an order to the matching engine
-// Returns error if channel is full (backpressure)
 func (me *MatchingEngine) SubmitOrder(order *Order) error {
+	if order == nil {
+		return errors.New("nil order")
+	}
 	select {
-	case me.orderChan <- order:
+	case <-me.stop:
+		return ErrEngineClosed
+	default:
+	}
+	if me.pendingTradeCount.Load() >= me.tradeBacklogLimit {
+		return ErrBackpressure
+	}
+	copiedOrder := *order
+	select {
+	case <-me.stop:
+		return ErrEngineClosed
+	case me.commandChan <- func() { me.processOrder(&copiedOrder) }:
 		me.ordersProcessed.Add(1)
 		return nil
 	default:
-		// Channel full - backpressure
 		return ErrBackpressure
 	}
 }
 
-// matchingLoop processes orders and performs matching
+func (me *MatchingEngine) runCommand(command func()) bool {
+	completed := make(chan struct{})
+	select {
+	case <-me.stop:
+		return false
+	case me.commandChan <- func() { command(); close(completed) }:
+	}
+	select {
+	case <-completed:
+		return true
+	case <-me.done:
+		return false
+	}
+}
+
+func (me *MatchingEngine) Close() {
+	me.closeOnce.Do(func() { close(me.stop) })
+	<-me.done
+}
+
 func (me *MatchingEngine) matchingLoop() {
-	for order := range me.orderChan {
-		me.processOrder(order)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	defer close(me.done)
+	defer close(me.tradeChan)
+	defer me.riskManager.Close()
+	for {
+		select {
+		case <-me.stop:
+			return
+		default:
+		}
+		var output chan *Trade
+		var next *Trade
+		if len(me.pendingTrades) > 0 {
+			output = me.tradeChan
+			next = me.pendingTrades[0]
+		}
+		select {
+		case <-me.stop:
+			return
+		case command := <-me.commandChan:
+			command()
+		case <-ticker.C:
+			me.checkAndTriggerStopOrders()
+		case output <- next:
+			me.pendingTrades[0] = nil
+			me.pendingTrades = me.pendingTrades[1:]
+			me.pendingTradeCount.Add(-1)
+		}
 	}
 }
 
@@ -122,7 +176,7 @@ func (me *MatchingEngine) matchLimitOrder(book *OrderBook, order *Order) {
 		if order.Remaining < order.Quantity {
 			order.Status = PartialFilled
 		}
-		book.AddOrder(order)
+		book.addOrder(order)
 	} else {
 		order.Status = Filled
 	}
@@ -131,13 +185,13 @@ func (me *MatchingEngine) matchLimitOrder(book *OrderBook, order *Order) {
 // matchBidLimit matches a buy limit order against asks
 func (me *MatchingEngine) matchBidLimit(book *OrderBook, order *Order) {
 	for order.Remaining > 0 {
-		bestAsk := book.GetBestAsk()
+		bestAsk := book.getBestAsk()
 		if bestAsk == nil || bestAsk.Price > order.Price {
 			break // No matching ask at acceptable price
 		}
 
 		// Match against orders at this price level (FIFO)
-		for _, askOrder := range bestAsk.Orders {
+		for _, askOrder := range append([]*Order(nil), bestAsk.Orders...) {
 			if order.Remaining == 0 {
 				break
 			}
@@ -164,7 +218,7 @@ func (me *MatchingEngine) matchBidLimit(book *OrderBook, order *Order) {
 				// Update ask order status
 				if askOrder.Remaining == 0 {
 					askOrder.Status = Filled
-					book.RemoveOrder(askOrder.ID)
+					book.removeOrder(askOrder.ID)
 				} else {
 					askOrder.Status = PartialFilled
 				}
@@ -185,13 +239,13 @@ func (me *MatchingEngine) matchBidLimit(book *OrderBook, order *Order) {
 // matchAskLimit matches a sell limit order against bids
 func (me *MatchingEngine) matchAskLimit(book *OrderBook, order *Order) {
 	for order.Remaining > 0 {
-		bestBid := book.GetBestBid()
+		bestBid := book.getBestBid()
 		if bestBid == nil || bestBid.Price < order.Price {
 			break // No matching bid at acceptable price
 		}
 
 		// Match against orders at this price level (FIFO)
-		for _, bidOrder := range bestBid.Orders {
+		for _, bidOrder := range append([]*Order(nil), bestBid.Orders...) {
 			if order.Remaining == 0 {
 				break
 			}
@@ -218,7 +272,7 @@ func (me *MatchingEngine) matchAskLimit(book *OrderBook, order *Order) {
 				// Update bid order status
 				if bidOrder.Remaining == 0 {
 					bidOrder.Status = Filled
-					book.RemoveOrder(bidOrder.ID)
+					book.removeOrder(bidOrder.ID)
 				} else {
 					bidOrder.Status = PartialFilled
 				}
@@ -239,13 +293,13 @@ func (me *MatchingEngine) matchAskLimit(book *OrderBook, order *Order) {
 // matchBidMarket matches a buy market order against asks
 func (me *MatchingEngine) matchBidMarket(book *OrderBook, order *Order) {
 	for order.Remaining > 0 {
-		bestAsk := book.GetBestAsk()
+		bestAsk := book.getBestAsk()
 		if bestAsk == nil {
 			break // No asks available
 		}
 
 		// Match against orders at this price level (FIFO)
-		for _, askOrder := range bestAsk.Orders {
+		for _, askOrder := range append([]*Order(nil), bestAsk.Orders...) {
 			if order.Remaining == 0 {
 				break
 			}
@@ -269,7 +323,7 @@ func (me *MatchingEngine) matchBidMarket(book *OrderBook, order *Order) {
 
 				if askOrder.Remaining == 0 {
 					askOrder.Status = Filled
-					book.RemoveOrder(askOrder.ID)
+					book.removeOrder(askOrder.ID)
 				} else {
 					askOrder.Status = PartialFilled
 				}
@@ -285,13 +339,13 @@ func (me *MatchingEngine) matchBidMarket(book *OrderBook, order *Order) {
 // matchAskMarket matches a sell market order against bids
 func (me *MatchingEngine) matchAskMarket(book *OrderBook, order *Order) {
 	for order.Remaining > 0 {
-		bestBid := book.GetBestBid()
+		bestBid := book.getBestBid()
 		if bestBid == nil {
 			break // No bids available
 		}
 
 		// Match against orders at this price level (FIFO)
-		for _, bidOrder := range bestBid.Orders {
+		for _, bidOrder := range append([]*Order(nil), bestBid.Orders...) {
 			if order.Remaining == 0 {
 				break
 			}
@@ -315,7 +369,7 @@ func (me *MatchingEngine) matchAskMarket(book *OrderBook, order *Order) {
 
 				if bidOrder.Remaining == 0 {
 					bidOrder.Status = Filled
-					book.RemoveOrder(bidOrder.ID)
+					book.removeOrder(bidOrder.ID)
 				} else {
 					bidOrder.Status = PartialFilled
 				}
@@ -331,36 +385,17 @@ func (me *MatchingEngine) matchAskMarket(book *OrderBook, order *Order) {
 // publishTrade sends a trade to the publication channel
 func (me *MatchingEngine) publishTrade(trade *Trade) {
 	me.tradesProcessed.Add(1)
-	select {
-	case me.tradeChan <- trade:
-		// Trade published successfully
-	default:
-		// Trade channel full - in production, this would trigger backpressure handling
-		// For now, we'll block briefly to avoid losing trades
-		me.tradeChan <- trade
-	}
+	me.pendingTrades = append(me.pendingTrades, trade)
+	me.pendingTradeCount.Add(1)
 }
 
 // getOrCreateBook gets or creates an order book for a symbol
 func (me *MatchingEngine) getOrCreateBook(symbol string) *OrderBook {
-	me.bookMu.RLock()
-	book, exists := me.books[symbol]
-	me.bookMu.RUnlock()
-
-	if exists {
-		return book
+	book := me.books[symbol]
+	if book == nil {
+		book = NewOrderBook(symbol)
+		me.books[symbol] = book
 	}
-
-	me.bookMu.Lock()
-	defer me.bookMu.Unlock()
-
-	// Double-check after acquiring write lock
-	if book, exists := me.books[symbol]; exists {
-		return book
-	}
-
-	book = NewOrderBook(symbol)
-	me.books[symbol] = book
 	return book
 }
 
@@ -371,45 +406,56 @@ func (me *MatchingEngine) GetTradeChannel() <-chan *Trade {
 
 // GetOrderBook returns the order book for a symbol
 func (me *MatchingEngine) GetOrderBook(symbol string) *OrderBook {
-	me.bookMu.RLock()
-	defer me.bookMu.RUnlock()
-	return me.books[symbol]
+	var bookCopy *OrderBook
+	me.runCommand(func() {
+		if book := me.books[symbol]; book != nil {
+			bookCopy = NewOrderBook(symbol)
+			for _, levels := range []PriceHeap{book.bids, book.asks} {
+				for _, level := range levels {
+					for _, order := range level.Orders {
+						bookCopy.AddOrder(order)
+					}
+				}
+			}
+		}
+	})
+	return bookCopy
 }
 
-// GetSnapshot returns a lock-free snapshot of the top of the book
 func (me *MatchingEngine) GetSnapshot(symbol string) *OrderBookSnapshot {
-	book := me.GetOrderBook(symbol)
-	if book == nil {
-		return nil
-	}
-	return book.GetSnapshot()
+	var snapshot *OrderBookSnapshot
+	me.runCommand(func() {
+		if book := me.books[symbol]; book != nil {
+			book.updateSnapshot()
+			snapshot = book.GetSnapshot()
+		}
+	})
+	return snapshot
 }
 
-// CancelOrder cancels an existing order
 func (me *MatchingEngine) CancelOrder(orderID uuid.UUID, symbol string) bool {
-	book := me.GetOrderBook(symbol)
-	if book == nil {
-		return false
-	}
-
-	order, exists := book.GetOrder(orderID)
-	if !exists {
-		return false
-	}
-
-	order.Status = Cancelled
-	book.RemoveOrder(orderID)
-	return true
+	cancelled := false
+	me.runCommand(func() {
+		if book := me.books[symbol]; book != nil {
+			if order, exists := book.orders[orderID]; exists {
+				order.Status = Cancelled
+				book.removeOrder(orderID)
+				cancelled = true
+			}
+		}
+	})
+	return cancelled
 }
 
-// GetStats returns engine statistics
 func (me *MatchingEngine) GetStats() EngineStats {
-	return EngineStats{
-		TradesProcessed:  me.tradesProcessed.Load(),
-		OrdersProcessed: me.ordersProcessed.Load(),
-		ActiveBooks:     uint64(len(me.books)),
-		PendingStopOrders: me.countStopOrders(),
-	}
+	stats := EngineStats{}
+	me.runCommand(func() {
+		stats.TradesProcessed = me.tradesProcessed.Load()
+		stats.OrdersProcessed = me.ordersProcessed.Load()
+		stats.ActiveBooks = uint64(len(me.books))
+		stats.PendingStopOrders = me.countStopOrders()
+	})
+	return stats
 }
 
 // GetRiskManager returns the risk manager
@@ -420,8 +466,8 @@ func (me *MatchingEngine) GetRiskManager() *RiskManager {
 // EngineStats represents matching engine statistics
 type EngineStats struct {
 	TradesProcessed   uint64
-	OrdersProcessed  uint64
-	ActiveBooks      uint64
+	OrdersProcessed   uint64
+	ActiveBooks       uint64
 	PendingStopOrders uint64
 }
 
@@ -429,30 +475,15 @@ type EngineStats struct {
 func (me *MatchingEngine) addStopOrder(order *Order) {
 	order.Status = Pending
 
-	me.stopMu.Lock()
-	defer me.stopMu.Unlock()
-
 	me.stopOrders[order.Symbol] = append(me.stopOrders[order.Symbol], order)
-}
-
-// stopOrderMonitor continuously checks if stop orders should be triggered
-func (me *MatchingEngine) stopOrderMonitor() {
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		me.checkAndTriggerStopOrders()
-	}
 }
 
 // checkAndTriggerStopOrders checks all pending stop orders and triggers those that should execute
 func (me *MatchingEngine) checkAndTriggerStopOrders() {
-	me.stopMu.Lock()
 	symbols := make([]string, 0, len(me.stopOrders))
 	for symbol := range me.stopOrders {
 		symbols = append(symbols, symbol)
 	}
-	me.stopMu.Unlock()
 
 	for _, symbol := range symbols {
 		me.processStopOrdersForSymbol(symbol)
@@ -461,13 +492,13 @@ func (me *MatchingEngine) checkAndTriggerStopOrders() {
 
 // processStopOrdersForSymbol processes stop orders for a specific symbol
 func (me *MatchingEngine) processStopOrdersForSymbol(symbol string) {
-	book := me.GetOrderBook(symbol)
+	book := me.books[symbol]
 	if book == nil {
 		return
 	}
 
-	bestBid := book.GetBestBid()
-	bestAsk := book.GetBestAsk()
+	bestBid := book.getBestBid()
+	bestAsk := book.getBestAsk()
 
 	var currentPrice uint64
 	if bestBid != nil && bestAsk != nil {
@@ -479,9 +510,6 @@ func (me *MatchingEngine) processStopOrdersForSymbol(symbol string) {
 	} else {
 		return // No market data available
 	}
-
-	me.stopMu.Lock()
-	defer me.stopMu.Unlock()
 
 	orders := me.stopOrders[symbol]
 	var remainingOrders []*Order
@@ -523,6 +551,7 @@ func (me *MatchingEngine) triggerStopOrder(stopOrder *Order) {
 	if stopOrder.Type == StopMarket {
 		execOrder = &Order{
 			ID:        stopOrder.ID,
+			ClientID:  stopOrder.ClientID,
 			Symbol:    stopOrder.Symbol,
 			Side:      stopOrder.Side,
 			Type:      Market,
@@ -535,6 +564,7 @@ func (me *MatchingEngine) triggerStopOrder(stopOrder *Order) {
 	} else { // StopLimit
 		execOrder = &Order{
 			ID:        stopOrder.ID,
+			ClientID:  stopOrder.ClientID,
 			Symbol:    stopOrder.Symbol,
 			Side:      stopOrder.Side,
 			Type:      Limit,
@@ -565,8 +595,6 @@ func (me *MatchingEngine) triggerStopOrder(stopOrder *Order) {
 
 // countStopOrders returns the total number of pending stop orders
 func (me *MatchingEngine) countStopOrders() uint64 {
-	me.stopMu.RLock()
-	defer me.stopMu.RUnlock()
 
 	count := uint64(0)
 	for _, orders := range me.stopOrders {
@@ -576,9 +604,7 @@ func (me *MatchingEngine) countStopOrders() uint64 {
 }
 
 // CancelStopOrder cancels a pending stop order
-func (me *MatchingEngine) CancelStopOrder(orderID uuid.UUID, symbol string) bool {
-	me.stopMu.Lock()
-	defer me.stopMu.Unlock()
+func (me *MatchingEngine) cancelStopOrder(orderID uuid.UUID, symbol string) bool {
 
 	orders := me.stopOrders[symbol]
 	for i, order := range orders {
@@ -600,4 +626,12 @@ func min(a, b uint64) uint64 {
 		return a
 	}
 	return b
+}
+
+var ErrEngineClosed = errors.New("matching engine closed")
+
+func (me *MatchingEngine) CancelStopOrder(orderID uuid.UUID, symbol string) bool {
+	cancelled := false
+	me.runCommand(func() { cancelled = me.cancelStopOrder(orderID, symbol) })
+	return cancelled
 }

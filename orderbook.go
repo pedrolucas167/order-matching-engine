@@ -29,23 +29,21 @@ func (h *PriceHeap) Pop() interface{} {
 }
 
 type OrderBook struct {
-	symbol string
-	bids  PriceHeap
-	bidMu sync.RWMutex
-	asks  PriceHeap
-	askMu sync.RWMutex
+	mu        sync.RWMutex
+	symbol    string
+	bids      PriceHeap
+	asks      PriceHeap
 	topOfBook atomic.Pointer[OrderBookSnapshot]
-	orders map[uuid.UUID]*Order
-	orderMu sync.RWMutex
+	orders    map[uuid.UUID]*Order
 }
 
 // NewOrderBook creates a new order book for a symbol
 func NewOrderBook(symbol string) *OrderBook {
 	ob := &OrderBook{
-		symbol:  symbol,
-		bids:    make(PriceHeap, 0),
-		asks:    make(PriceHeap, 0),
-		orders:  make(map[uuid.UUID]*Order),
+		symbol: symbol,
+		bids:   make(PriceHeap, 0),
+		asks:   make(PriceHeap, 0),
+		orders: make(map[uuid.UUID]*Order),
 	}
 	heap.Init(&ob.bids)
 	heap.Init(&ob.asks)
@@ -54,10 +52,8 @@ func NewOrderBook(symbol string) *OrderBook {
 }
 
 // AddOrder adds an order to the appropriate side of the book
-func (ob *OrderBook) AddOrder(order *Order) {
-	ob.orderMu.Lock()
+func (ob *OrderBook) addOrder(order *Order) {
 	ob.orders[order.ID] = order
-	ob.orderMu.Unlock()
 
 	if order.Side == Bid {
 		ob.addBid(order)
@@ -69,8 +65,6 @@ func (ob *OrderBook) AddOrder(order *Order) {
 
 // addBid adds a buy order to the bid side
 func (ob *OrderBook) addBid(order *Order) {
-	ob.bidMu.Lock()
-	defer ob.bidMu.Unlock()
 
 	// Find existing price level or create new one
 	var level *PriceLevel
@@ -97,8 +91,6 @@ func (ob *OrderBook) addBid(order *Order) {
 
 // addAsk adds a sell order to the ask side
 func (ob *OrderBook) addAsk(order *Order) {
-	ob.askMu.Lock()
-	defer ob.askMu.Unlock()
 
 	// Find existing price level or create new one
 	var level *PriceLevel
@@ -124,9 +116,7 @@ func (ob *OrderBook) addAsk(order *Order) {
 }
 
 // GetBestBid returns the best bid price level (highest buy price)
-func (ob *OrderBook) GetBestBid() *PriceLevel {
-	ob.bidMu.RLock()
-	defer ob.bidMu.RUnlock()
+func (ob *OrderBook) getBestBid() *PriceLevel {
 
 	if len(ob.bids) == 0 {
 		return nil
@@ -135,9 +125,7 @@ func (ob *OrderBook) GetBestBid() *PriceLevel {
 }
 
 // GetBestAsk returns the best ask price level (lowest sell price)
-func (ob *OrderBook) GetBestAsk() *PriceLevel {
-	ob.askMu.RLock()
-	defer ob.askMu.RUnlock()
+func (ob *OrderBook) getBestAsk() *PriceLevel {
 
 	if len(ob.asks) == 0 {
 		return nil
@@ -147,15 +135,19 @@ func (ob *OrderBook) GetBestAsk() *PriceLevel {
 
 // GetSnapshot returns a lock-free snapshot of the top of the book
 func (ob *OrderBook) GetSnapshot() *OrderBookSnapshot {
-	return ob.topOfBook.Load()
+	snapshot := ob.topOfBook.Load()
+	copied := *snapshot
+	copied.BestBid = ob.clonePriceLevel(snapshot.BestBid)
+	copied.BestAsk = ob.clonePriceLevel(snapshot.BestAsk)
+	return &copied
 }
 
 // updateSnapshot atomically updates the top-of-book snapshot
 func (ob *OrderBook) updateSnapshot() {
 	snapshot := &OrderBookSnapshot{
 		Symbol:    ob.symbol,
-		BestBid:   ob.clonePriceLevel(ob.GetBestBid()),
-		BestAsk:   ob.clonePriceLevel(ob.GetBestAsk()),
+		BestBid:   ob.clonePriceLevel(ob.getBestBid()),
+		BestAsk:   ob.clonePriceLevel(ob.getBestAsk()),
 		Timestamp: time.Now().UnixNano(),
 	}
 	ob.topOfBook.Store(snapshot)
@@ -167,20 +159,23 @@ func (ob *OrderBook) clonePriceLevel(level *PriceLevel) *PriceLevel {
 		return nil
 	}
 	orders := make([]*Order, len(level.Orders))
-	copy(orders, level.Orders)
+	var total uint64
+	for i, order := range level.Orders {
+		copied := *order
+		orders[i] = &copied
+		total += copied.Remaining
+	}
 	return &PriceLevel{
 		Price:     level.Price,
-		TotalQty:  level.TotalQty,
+		TotalQty:  total,
 		Orders:    orders,
 		Timestamp: level.Timestamp,
 	}
 }
 
 // RemoveOrder removes an order from the book
-func (ob *OrderBook) RemoveOrder(orderID uuid.UUID) {
-	ob.orderMu.RLock()
+func (ob *OrderBook) removeOrder(orderID uuid.UUID) {
 	order, exists := ob.orders[orderID]
-	ob.orderMu.RUnlock()
 
 	if !exists {
 		return
@@ -192,17 +187,13 @@ func (ob *OrderBook) RemoveOrder(orderID uuid.UUID) {
 		ob.removeAsk(order)
 	}
 
-	ob.orderMu.Lock()
 	delete(ob.orders, orderID)
-	ob.orderMu.Unlock()
 
 	ob.updateSnapshot()
 }
 
 // removeBid removes a buy order from the bid side
 func (ob *OrderBook) removeBid(order *Order) {
-	ob.bidMu.Lock()
-	defer ob.bidMu.Unlock()
 
 	for _, level := range ob.bids {
 		if level.Price == order.Price {
@@ -224,8 +215,6 @@ func (ob *OrderBook) removeBid(order *Order) {
 
 // removeAsk removes a sell order from the ask side
 func (ob *OrderBook) removeAsk(order *Order) {
-	ob.askMu.Lock()
-	defer ob.askMu.Unlock()
 
 	for _, level := range ob.asks {
 		if level.Price == order.Price {
@@ -256,9 +245,39 @@ func (ob *OrderBook) removePriceLevel(h *PriceHeap, price uint64) {
 }
 
 // GetOrder retrieves an order by ID
-func (ob *OrderBook) GetOrder(orderID uuid.UUID) (*Order, bool) {
-	ob.orderMu.RLock()
-	defer ob.orderMu.RUnlock()
+func (ob *OrderBook) getOrder(orderID uuid.UUID) (*Order, bool) {
 	order, exists := ob.orders[orderID]
 	return order, exists
+}
+
+func (ob *OrderBook) AddOrder(order *Order) {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	copied := *order
+	ob.addOrder(&copied)
+}
+func (ob *OrderBook) RemoveOrder(id uuid.UUID) {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	ob.removeOrder(id)
+}
+func (ob *OrderBook) GetOrder(id uuid.UUID) (*Order, bool) {
+	ob.mu.RLock()
+	defer ob.mu.RUnlock()
+	order, exists := ob.getOrder(id)
+	if !exists {
+		return nil, false
+	}
+	copied := *order
+	return &copied, true
+}
+func (ob *OrderBook) GetBestBid() *PriceLevel {
+	ob.mu.RLock()
+	defer ob.mu.RUnlock()
+	return ob.clonePriceLevel(ob.getBestBid())
+}
+func (ob *OrderBook) GetBestAsk() *PriceLevel {
+	ob.mu.RLock()
+	defer ob.mu.RUnlock()
+	return ob.clonePriceLevel(ob.getBestAsk())
 }

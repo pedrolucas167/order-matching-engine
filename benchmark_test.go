@@ -10,7 +10,7 @@ import (
 
 func BenchmarkMatchingEngine_SubmitOrder(b *testing.B) {
 	engine := NewMatchingEngine(10000, 10000)
-	defer close(engine.orderChan)
+	defer engine.Close()
 
 	symbol := "BTC-USD"
 
@@ -77,7 +77,7 @@ func BenchmarkOrderBook_GetSnapshot(b *testing.B) {
 
 func BenchmarkMatchingEngine_ConcurrentMatching(b *testing.B) {
 	engine := NewMatchingEngine(10000, 10000)
-	defer close(engine.orderChan)
+	defer engine.Close()
 
 	symbol := "BTC-USD"
 
@@ -116,7 +116,7 @@ func BenchmarkMatchingEngine_ConcurrentMatching(b *testing.B) {
 
 func BenchmarkMatchingEngine_LockFreeSnapshot(b *testing.B) {
 	engine := NewMatchingEngine(10000, 10000)
-	defer close(engine.orderChan)
+	defer engine.Close()
 
 	symbol := "BTC-USD"
 
@@ -145,7 +145,7 @@ func BenchmarkMatchingEngine_LockFreeSnapshot(b *testing.B) {
 
 func BenchmarkMatchingEngine_HighThroughput(b *testing.B) {
 	engine := NewMatchingEngine(100000, 100000)
-	defer close(engine.orderChan)
+	defer engine.Close()
 
 	symbol := "BTC-USD"
 
