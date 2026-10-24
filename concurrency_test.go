@@ -253,3 +253,112 @@ func TestTriggeredStopLimitCanBeCancelledAsRestingOrder(t *testing.T) {
 		t.Fatal("triggered limit order could not be cancelled")
 	}
 }
+
+func TestConcurrentRestingCancellationConservesLiquidity(t *testing.T) {
+	engine := NewMatchingEngine(1024, 1024)
+	defer engine.Close()
+	const orderCount = 100
+	restingOrders := make([]*Order, orderCount)
+	for i := range restingOrders {
+		restingOrders[i] = testOrder(Ask, Limit, 1)
+		submitTestOrder(t, engine, restingOrders[i])
+	}
+	synchronizeEngine(t, engine)
+	start := make(chan struct{})
+	cancelledOrders := make(chan uuid.UUID, orderCount)
+	var workers sync.WaitGroup
+	for i := range restingOrders {
+		workers.Add(2)
+		go func(order *Order) {
+			defer workers.Done()
+			<-start
+			if engine.CancelOrder(order.ID, order.Symbol) {
+				cancelledOrders <- order.ID
+			}
+		}(restingOrders[i])
+		go func(index int) {
+			defer workers.Done()
+			<-start
+			kind := Market
+			if index%2 == 0 {
+				kind = StopMarket
+			}
+			if err := engine.SubmitOrder(testOrder(Bid, kind, 1)); err != nil {
+				t.Error(err)
+			}
+			snapshot := engine.GetSnapshot("TEST")
+			if snapshot.BestAsk != nil {
+				snapshot.BestAsk.Orders[0].Remaining = 999
+			}
+			engine.GetStats()
+		}(i)
+	}
+	close(start)
+	workers.Wait()
+	close(cancelledOrders)
+	engine.runCommand(func() { engine.checkAndTriggerStopOrders(); engine.checkAndTriggerStopOrders() })
+	cancelled := make(map[uuid.UUID]bool)
+	for id := range cancelledOrders {
+		cancelled[id] = true
+	}
+	stats := engine.GetStats()
+	executed := make(map[uuid.UUID]bool)
+	for i := uint64(0); i < stats.TradesProcessed; i++ {
+		select {
+		case trade := <-engine.GetTradeChannel():
+			if cancelled[trade.AskOrder] {
+				t.Fatal("successfully cancelled order was executed")
+			}
+			if executed[trade.AskOrder] {
+				t.Fatal("resting order executed twice")
+			}
+			if trade.Quantity != 1 {
+				t.Fatalf("unexpected trade quantity %d", trade.Quantity)
+			}
+			executed[trade.AskOrder] = true
+		case <-time.After(3 * time.Second):
+			t.Fatal("missing trade")
+		}
+	}
+	snapshot := engine.GetSnapshot("TEST")
+	var remaining uint64
+	if snapshot.BestAsk != nil {
+		remaining = snapshot.BestAsk.TotalQty
+	}
+	if uint64(len(cancelled))+stats.TradesProcessed+remaining != orderCount {
+		t.Fatalf("liquidity not conserved: cancelled=%d executed=%d remaining=%d", len(cancelled), stats.TradesProcessed, remaining)
+	}
+}
+
+func TestOrderBookConcurrentPublicAccess(t *testing.T) {
+	book := NewOrderBook("TEST")
+	var workers sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for j := 0; j < 20; j++ {
+				order := testOrder(Ask, Limit, 1)
+				book.AddOrder(order)
+				snapshot := book.GetSnapshot()
+				var total uint64
+				for _, copiedOrder := range snapshot.BestAsk.Orders {
+					total += copiedOrder.Remaining
+					copiedOrder.Remaining = 999
+				}
+				if total != snapshot.BestAsk.TotalQty {
+					t.Errorf("inconsistent snapshot: total=%d reported=%d", total, snapshot.BestAsk.TotalQty)
+				}
+				level := book.GetBestAsk()
+				level.Orders[0].Remaining = 999
+				copied, _ := book.GetOrder(order.ID)
+				copied.Remaining = 999
+				book.RemoveOrder(order.ID)
+			}
+		}()
+	}
+	workers.Wait()
+	if book.GetBestAsk() != nil || book.GetSnapshot().BestAsk != nil {
+		t.Fatal("removed orders remained in book")
+	}
+}
