@@ -526,7 +526,7 @@ func (me *MatchingEngine) processStopOrdersForSymbol(symbol string) {
 
 	var currentPrice uint64
 	if bestBid != nil && bestAsk != nil {
-		currentPrice = (bestBid.Price + bestAsk.Price) / 2
+		currentPrice = bestBid.Price + (bestAsk.Price-bestBid.Price)/2
 	} else if bestBid != nil {
 		currentPrice = bestBid.Price
 	} else if bestAsk != nil {
