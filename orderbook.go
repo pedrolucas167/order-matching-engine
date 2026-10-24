@@ -87,13 +87,13 @@ func (ob *OrderBook) addBid(order *Order) {
 	if level == nil {
 		level = &PriceLevel{
 			Price:     order.Price,
-			TotalQty:  order.Quantity,
+			TotalQty:  order.Remaining,
 			Orders:    []*Order{order},
 			Timestamp: order.Timestamp,
 		}
 		heap.Push(&ob.bids, level)
 	} else {
-		level.TotalQty += order.Quantity
+		level.TotalQty += order.Remaining
 		level.Orders = append(level.Orders, order)
 	}
 }
@@ -113,13 +113,13 @@ func (ob *OrderBook) addAsk(order *Order) {
 	if level == nil {
 		level = &PriceLevel{
 			Price:     order.Price,
-			TotalQty:  order.Quantity,
+			TotalQty:  order.Remaining,
 			Orders:    []*Order{order},
 			Timestamp: order.Timestamp,
 		}
 		heap.Push(&ob.asks, level)
 	} else {
-		level.TotalQty += order.Quantity
+		level.TotalQty += order.Remaining
 		level.Orders = append(level.Orders, order)
 	}
 }

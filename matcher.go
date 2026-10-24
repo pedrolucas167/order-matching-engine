@@ -177,6 +177,8 @@ func (me *MatchingEngine) matchMarketOrder(book *OrderBook, order *Order) {
 	// If order not fully filled, reject remaining
 	if order.Remaining > 0 {
 		order.Status = Rejected
+	} else {
+		order.Status = Filled
 	}
 }
 
@@ -232,6 +234,7 @@ func (me *MatchingEngine) matchBidLimit(book *OrderBook, order *Order) {
 				// Update order quantities
 				order.Remaining -= tradeQty
 				askOrder.Remaining -= tradeQty
+				bestAsk.TotalQty -= tradeQty
 
 				// Update ask order status
 				if askOrder.Remaining == 0 {
@@ -286,6 +289,7 @@ func (me *MatchingEngine) matchAskLimit(book *OrderBook, order *Order) {
 				// Update order quantities
 				order.Remaining -= tradeQty
 				bidOrder.Remaining -= tradeQty
+				bestBid.TotalQty -= tradeQty
 
 				// Update bid order status
 				if bidOrder.Remaining == 0 {
@@ -338,6 +342,7 @@ func (me *MatchingEngine) matchBidMarket(book *OrderBook, order *Order) {
 
 				order.Remaining -= tradeQty
 				askOrder.Remaining -= tradeQty
+				bestAsk.TotalQty -= tradeQty
 
 				if askOrder.Remaining == 0 {
 					askOrder.Status = Filled
@@ -384,6 +389,7 @@ func (me *MatchingEngine) matchAskMarket(book *OrderBook, order *Order) {
 
 				order.Remaining -= tradeQty
 				bidOrder.Remaining -= tradeQty
+				bestBid.TotalQty -= tradeQty
 
 				if bidOrder.Remaining == 0 {
 					bidOrder.Status = Filled
@@ -559,55 +565,16 @@ func (me *MatchingEngine) processStopOrdersForSymbol(symbol string) {
 	me.stopOrders[symbol] = remainingOrders
 }
 
-// triggerStopOrder converts a stop order to a market or limit order
-func (me *MatchingEngine) triggerStopOrder(stopOrder *Order) {
-	stopOrder.Status = Triggered
-
-	// Create the actual order to execute
-	var execOrder *Order
-
-	if stopOrder.Type == StopMarket {
-		execOrder = &Order{
-			ID:        stopOrder.ID,
-			ClientID:  stopOrder.ClientID,
-			Symbol:    stopOrder.Symbol,
-			Side:      stopOrder.Side,
-			Type:      Market,
-			Price:     0,
-			Quantity:  stopOrder.Quantity,
-			Remaining: stopOrder.Remaining,
-			Status:    Open,
-			Timestamp: time.Now().UnixNano(),
-		}
-	} else { // StopLimit
-		execOrder = &Order{
-			ID:        stopOrder.ID,
-			ClientID:  stopOrder.ClientID,
-			Symbol:    stopOrder.Symbol,
-			Side:      stopOrder.Side,
-			Type:      Limit,
-			Price:     stopOrder.Price, // Use limit price
-			Quantity:  stopOrder.Quantity,
-			Remaining: stopOrder.Remaining,
-			Status:    Open,
-			Timestamp: time.Now().UnixNano(),
-		}
-	}
-
-	// Submit the triggered order for execution
-	book := me.getOrCreateBook(stopOrder.Symbol)
-	if execOrder.Type == Market {
-		me.matchMarketOrder(book, execOrder)
+func (me *MatchingEngine) triggerStopOrder(order *Order) {
+	order.Timestamp = time.Now().UnixNano()
+	book := me.getOrCreateBook(order.Symbol)
+	if order.Type == StopMarket {
+		order.Type = Market
+		order.Price = 0
+		me.matchMarketOrder(book, order)
 	} else {
-		me.matchLimitOrder(book, execOrder)
-	}
-
-	// Update original stop order status
-	if execOrder.Remaining == 0 {
-		stopOrder.Status = Filled
-	} else if execOrder.Remaining < stopOrder.Quantity {
-		stopOrder.Status = PartialFilled
-		stopOrder.Remaining = execOrder.Remaining
+		order.Type = Limit
+		me.matchLimitOrder(book, order)
 	}
 }
 
