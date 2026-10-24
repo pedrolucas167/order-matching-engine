@@ -87,3 +87,30 @@ func TestOrderBookBestPricesAfterRemoval(t *testing.T) {
 		t.Fatalf("best ask=%d; want 120", best.Price)
 	}
 }
+
+func TestStopLimitJoinsFIFOAtActivation(t *testing.T) {
+	engine := NewMatchingEngine(16, 16)
+	defer engine.Close()
+	stop := testOrder(Bid, StopLimit, 1)
+	stop.StopPrice = 110
+	submitTestOrder(t, engine, stop)
+	resting := testOrder(Bid, Limit, 1)
+	submitTestOrder(t, engine, resting)
+	ask := testOrder(Ask, Limit, 1)
+	ask.Price = 120
+	submitTestOrder(t, engine, ask)
+	engine.runCommand(func() { engine.checkAndTriggerStopOrders() })
+	if stats := engine.GetStats(); stats.PendingStopOrders != 0 {
+		t.Fatal("stop did not activate")
+	}
+	submitTestOrder(t, engine, testOrder(Ask, Market, 2))
+	if stats := engine.GetStats(); stats.TradesProcessed != 2 {
+		t.Fatalf("activated stop was not matched: %+v", stats)
+	}
+	for _, expected := range []*Order{resting, stop} {
+		trade := readTestTrade(t, engine)
+		if trade.BidOrder != expected.ID || trade.BidClient != expected.ClientID || trade.Price != 100 || trade.Quantity != 1 {
+			t.Fatalf("stop activation violated FIFO: %+v", trade)
+		}
+	}
+}
