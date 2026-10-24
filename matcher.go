@@ -122,6 +122,10 @@ func (me *MatchingEngine) matchingLoop() {
 
 // processOrder handles a single order
 func (me *MatchingEngine) processOrder(order *Order) {
+	if me.hasActiveOrder(order.ID, order.Symbol) {
+		order.Status = Rejected
+		return
+	}
 	// Perform risk checks before processing
 	riskResult := me.riskManager.CheckOrder(order)
 	if !riskResult.Approved {
@@ -146,6 +150,20 @@ func (me *MatchingEngine) processOrder(order *Order) {
 
 	// Limit orders are added to the book and matched if possible
 	me.matchLimitOrder(book, order)
+}
+
+func (me *MatchingEngine) hasActiveOrder(orderID uuid.UUID, symbol string) bool {
+	if book := me.books[symbol]; book != nil {
+		if _, exists := book.orders[orderID]; exists {
+			return true
+		}
+	}
+	for _, order := range me.stopOrders[symbol] {
+		if order.ID == orderID {
+			return true
+		}
+	}
+	return false
 }
 
 // matchMarketOrder matches a market order immediately

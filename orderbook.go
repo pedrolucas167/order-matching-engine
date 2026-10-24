@@ -59,6 +59,9 @@ func NewOrderBook(symbol string) *OrderBook {
 
 // AddOrder adds an order to the appropriate side of the book
 func (ob *OrderBook) addOrder(order *Order) {
+	if _, exists := ob.orders[order.ID]; exists {
+		return
+	}
 	ob.orders[order.ID] = order
 
 	if order.Side == Bid {
