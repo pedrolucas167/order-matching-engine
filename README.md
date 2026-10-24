@@ -5,7 +5,7 @@ Um motor de matching de ordens de alta performance em Go, projetado para latênc
 ## Funcionalidades
 
 ### Core Functionality
-- **Price-Time Priority (FIFO)**: Ordens são matcheadas por preço primeiro, depois timestamp
+- **Price-Time Priority (FIFO)**: Ordens são matcheadas pelo melhor preço; no mesmo preço, seguem a ordem de processamento no loop
 - **Limit & Market Orders**: Suporte para ambos os tipos de ordens
 - **Publicação de Trades em Tempo Real**: Trades publicados via canais bufferizados
 - **Multi-Symbol Support**: Order books separados por símbolo, processados pelo mesmo loop

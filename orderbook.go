@@ -28,10 +28,16 @@ func (h *PriceHeap) Pop() interface{} {
 	return x
 }
 
+type BidPriceHeap struct {
+	PriceHeap
+}
+
+func (h BidPriceHeap) Less(i, j int) bool { return h.PriceHeap[i].Price > h.PriceHeap[j].Price }
+
 type OrderBook struct {
 	mu        sync.RWMutex
 	symbol    string
-	bids      PriceHeap
+	bids      BidPriceHeap
 	asks      PriceHeap
 	topOfBook atomic.Pointer[OrderBookSnapshot]
 	orders    map[uuid.UUID]*Order
@@ -41,7 +47,7 @@ type OrderBook struct {
 func NewOrderBook(symbol string) *OrderBook {
 	ob := &OrderBook{
 		symbol: symbol,
-		bids:   make(PriceHeap, 0),
+		bids:   BidPriceHeap{PriceHeap: make(PriceHeap, 0)},
 		asks:   make(PriceHeap, 0),
 		orders: make(map[uuid.UUID]*Order),
 	}
@@ -68,7 +74,7 @@ func (ob *OrderBook) addBid(order *Order) {
 
 	// Find existing price level or create new one
 	var level *PriceLevel
-	for _, l := range ob.bids {
+	for _, l := range ob.bids.PriceHeap {
 		if l.Price == order.Price {
 			level = l
 			break
@@ -118,10 +124,10 @@ func (ob *OrderBook) addAsk(order *Order) {
 // GetBestBid returns the best bid price level (highest buy price)
 func (ob *OrderBook) getBestBid() *PriceLevel {
 
-	if len(ob.bids) == 0 {
+	if len(ob.bids.PriceHeap) == 0 {
 		return nil
 	}
-	return ob.bids[0]
+	return ob.bids.PriceHeap[0]
 }
 
 // GetBestAsk returns the best ask price level (lowest sell price)
@@ -195,7 +201,7 @@ func (ob *OrderBook) removeOrder(orderID uuid.UUID) {
 // removeBid removes a buy order from the bid side
 func (ob *OrderBook) removeBid(order *Order) {
 
-	for _, level := range ob.bids {
+	for levelIndex, level := range ob.bids.PriceHeap {
 		if level.Price == order.Price {
 			for i, o := range level.Orders {
 				if o.ID == order.ID {
@@ -206,7 +212,7 @@ func (ob *OrderBook) removeBid(order *Order) {
 			}
 			// Remove empty price level
 			if len(level.Orders) == 0 {
-				ob.removePriceLevel(&ob.bids, level.Price)
+				heap.Remove(&ob.bids, levelIndex)
 			}
 			break
 		}
@@ -216,7 +222,7 @@ func (ob *OrderBook) removeBid(order *Order) {
 // removeAsk removes a sell order from the ask side
 func (ob *OrderBook) removeAsk(order *Order) {
 
-	for _, level := range ob.asks {
+	for levelIndex, level := range ob.asks {
 		if level.Price == order.Price {
 			for i, o := range level.Orders {
 				if o.ID == order.ID {
@@ -227,18 +233,8 @@ func (ob *OrderBook) removeAsk(order *Order) {
 			}
 			// Remove empty price level
 			if len(level.Orders) == 0 {
-				ob.removePriceLevel(&ob.asks, level.Price)
+				heap.Remove(&ob.asks, levelIndex)
 			}
-			break
-		}
-	}
-}
-
-// removePriceLevel removes a price level from the heap
-func (ob *OrderBook) removePriceLevel(h *PriceHeap, price uint64) {
-	for i, level := range *h {
-		if level.Price == price {
-			heap.Remove(h, i)
 			break
 		}
 	}

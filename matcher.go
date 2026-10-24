@@ -410,7 +410,7 @@ func (me *MatchingEngine) GetOrderBook(symbol string) *OrderBook {
 	me.runCommand(func() {
 		if book := me.books[symbol]; book != nil {
 			bookCopy = NewOrderBook(symbol)
-			for _, levels := range []PriceHeap{book.bids, book.asks} {
+			for _, levels := range []PriceHeap{book.bids.PriceHeap, book.asks} {
 				for _, level := range levels {
 					for _, order := range level.Orders {
 						bookCopy.AddOrder(order)
