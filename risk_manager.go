@@ -9,6 +9,9 @@ import (
 )
 
 type RiskManager struct {
+	stop            chan struct{}
+	done            chan struct{}
+	closeOnce       sync.Once
 	clients         map[uuid.UUID]*Client
 	clientMu        sync.RWMutex
 	riskLimits      map[uuid.UUID]*RiskLimits
@@ -32,6 +35,8 @@ type RiskStats struct {
 // NewRiskManager creates a new risk manager
 func NewRiskManager() *RiskManager {
 	rm := &RiskManager{
+		stop:            make(chan struct{}),
+		done:            make(chan struct{}),
 		clients:         make(map[uuid.UUID]*Client),
 		riskLimits:      make(map[uuid.UUID]*RiskLimits),
 		circuitBreakers: make(map[string]*CircuitBreaker),
@@ -48,7 +53,10 @@ func NewRiskManager() *RiskManager {
 func (rm *RiskManager) AddClient(client *Client) {
 	rm.clientMu.Lock()
 	defer rm.clientMu.Unlock()
-	rm.clients[client.ID] = client
+	copied := *client
+	rm.clients[client.ID] = &copied
+	rm.volumeMu.Lock()
+	defer rm.volumeMu.Unlock()
 	rm.dailyVolume[client.ID] = make(map[string]uint64)
 }
 
@@ -56,14 +64,16 @@ func (rm *RiskManager) AddClient(client *Client) {
 func (rm *RiskManager) SetRiskLimits(clientID uuid.UUID, limits *RiskLimits) {
 	rm.limitsMu.Lock()
 	defer rm.limitsMu.Unlock()
-	rm.riskLimits[clientID] = limits
+	copied := *limits
+	rm.riskLimits[clientID] = &copied
 }
 
 // AddCircuitBreaker adds a circuit breaker for a symbol
 func (rm *RiskManager) AddCircuitBreaker(breaker *CircuitBreaker) {
 	rm.breakerMu.Lock()
 	defer rm.breakerMu.Unlock()
-	rm.circuitBreakers[breaker.Symbol] = breaker
+	copied := *breaker
+	rm.circuitBreakers[breaker.Symbol] = &copied
 }
 
 // CheckOrder performs all risk checks before allowing an order
@@ -100,6 +110,10 @@ func (rm *RiskManager) CheckOrder(order *Order) RiskCheckResult {
 func (rm *RiskManager) checkCircuitBreaker(order *Order) RiskCheckResult {
 	rm.breakerMu.RLock()
 	breaker, exists := rm.circuitBreakers[order.Symbol]
+	if exists {
+		copied := *breaker
+		breaker = &copied
+	}
 	rm.breakerMu.RUnlock()
 
 	if !exists {
@@ -174,6 +188,10 @@ func (rm *RiskManager) checkDailyVolume(order *Order) RiskCheckResult {
 func (rm *RiskManager) checkExposure(order *Order) RiskCheckResult {
 	rm.clientMu.RLock()
 	client, exists := rm.clients[order.ClientID]
+	if exists {
+		copied := *client
+		client = &copied
+	}
 	rm.clientMu.RUnlock()
 
 	if !exists {
@@ -214,6 +232,10 @@ func (rm *RiskManager) checkExposure(order *Order) RiskCheckResult {
 func (rm *RiskManager) checkCollateral(order *Order) RiskCheckResult {
 	rm.clientMu.RLock()
 	client, exists := rm.clients[order.ClientID]
+	if exists {
+		copied := *client
+		client = &copied
+	}
 	rm.clientMu.RUnlock()
 
 	if !exists {
@@ -304,8 +326,14 @@ func (rm *RiskManager) cooldownMonitor() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		rm.checkCooldowns()
+	defer close(rm.done)
+	for {
+		select {
+		case <-rm.stop:
+			return
+		case <-ticker.C:
+			rm.checkCooldowns()
+		}
 	}
 }
 
@@ -332,7 +360,11 @@ func (rm *RiskManager) GetClient(clientID uuid.UUID) (*Client, bool) {
 	rm.clientMu.RLock()
 	defer rm.clientMu.RUnlock()
 	client, exists := rm.clients[clientID]
-	return client, exists
+	if !exists {
+		return nil, false
+	}
+	copied := *client
+	return &copied, true
 }
 
 // GetCircuitBreaker returns the circuit breaker for a symbol
@@ -340,7 +372,11 @@ func (rm *RiskManager) GetCircuitBreaker(symbol string) (*CircuitBreaker, bool) 
 	rm.breakerMu.RLock()
 	defer rm.breakerMu.RUnlock()
 	breaker, exists := rm.circuitBreakers[symbol]
-	return breaker, exists
+	if !exists {
+		return nil, false
+	}
+	copied := *breaker
+	return &copied, true
 }
 
 // GetStats returns risk management statistics
@@ -374,3 +410,8 @@ var ErrClientNotFound = errors.New("client not found")
 var ErrInsufficientCollateral = errors.New("insufficient collateral")
 var ErrExposureLimitExceeded = errors.New("exposure limit exceeded")
 var ErrCircuitBreakerOpen = errors.New("circuit breaker is open")
+
+func (rm *RiskManager) Close() {
+	rm.closeOnce.Do(func() { close(rm.stop) })
+	<-rm.done
+}
