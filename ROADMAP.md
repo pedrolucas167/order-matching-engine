@@ -27,6 +27,8 @@ A etapa 1 fica dividida em **1a: posições, margem inicial e reservas** e **1b:
 
 ## Etapas e critérios de conclusão
 
+Incremento atual: recibos de submissão idempotentes, proteção contra reenvio após execução/cancelamento e um handler HTTP com teste de 10.000 chamadas. O histórico é limitado e permanece em memória; **a etapa 2 continua pendente**, pois ainda não existem aceitação durável, reconstrução de estado ou garantia através de reinícios. A interface da etapa 4 também é parcial: sem autenticação, consulta HTTP de estado atual ou servidor externo implantado.
+
 | Etapa | Resultado esperado | Critério de conclusão |
 | --- | --- | --- |
 | 1. Modelo financeiro e reservas | Contas por cliente/ativo, unidades explícitas, aritmética verificada, reservas e limites coerentes com o mercado escolhido | Ordens simultâneas não reutilizam garantia; fills atualizam posições líquidas por instrumento; cancelamentos e rejeições liberam somente a reserva restante, preservando a margem de posições ainda abertas |
