@@ -13,6 +13,26 @@ import (
 	"github.com/google/uuid"
 )
 
+func TestDurableClientReadDoesNotExposeMutableFunding(t *testing.T) {
+	engine, _, buyer, _ := newDurableFuturesTest(t)
+	client, err := engine.GetClient(buyer)
+	if err != nil || client.Collateral != 1000 {
+		t.Fatal(err)
+	}
+	client.Collateral = 0
+	unchanged, err := engine.GetClient(buyer)
+	if err != nil || unchanged.Collateral != 1000 {
+		t.Fatal("client query exposed mutable funding", err)
+	}
+	if _, err := engine.GetClient(uuid.New()); !errors.Is(err, ErrClientNotFound) {
+		t.Fatal(err)
+	}
+	engine.Close()
+	if _, err := engine.GetClient(buyer); !errors.Is(err, ErrEngineClosed) {
+		t.Fatal(err)
+	}
+}
+
 func TestDurableOutboxBackpressurePagesAndAcknowledgments(t *testing.T) {
 	engine, path, buyer, seller := newDurableFuturesTest(t)
 	engine.Close()
