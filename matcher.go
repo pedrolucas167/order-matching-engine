@@ -28,6 +28,10 @@ type MatchingEngine struct {
 	markTimes         map[string]time.Time
 	liquidationPolicy LiquidationPolicy
 	liquidations      map[liquidationKey]LiquidationStatus
+	requests          map[string]processedOrderRequest
+	requestOrders     map[uuid.UUID]string
+	requestLimit      int
+	requestSequence   uint64
 }
 
 func NewMatchingEngine(orderBufferSize, tradeBufferSize int) *MatchingEngine {
@@ -40,16 +44,19 @@ func NewDerivativesMatchingEngine(orderBufferSize, tradeBufferSize int) *Matchin
 
 func newMatchingEngine(orderBufferSize, tradeBufferSize int, derivativesEnabled bool) *MatchingEngine {
 	me := &MatchingEngine{
-		books:        make(map[string]*OrderBook),
-		stopOrders:   make(map[string][]*Order),
-		riskManager:  newRiskManager(derivativesEnabled),
-		tradeChan:    make(chan *Trade, tradeBufferSize),
-		commandChan:  make(chan func(), orderBufferSize),
-		stop:         make(chan struct{}),
-		done:         make(chan struct{}),
-		priceFeeds:   make(map[string]*priceFeedState),
-		markTimes:    make(map[string]time.Time),
-		liquidations: make(map[liquidationKey]LiquidationStatus),
+		books:         make(map[string]*OrderBook),
+		stopOrders:    make(map[string][]*Order),
+		riskManager:   newRiskManager(derivativesEnabled),
+		tradeChan:     make(chan *Trade, tradeBufferSize),
+		commandChan:   make(chan func(), orderBufferSize),
+		stop:          make(chan struct{}),
+		done:          make(chan struct{}),
+		priceFeeds:    make(map[string]*priceFeedState),
+		markTimes:     make(map[string]time.Time),
+		liquidations:  make(map[liquidationKey]LiquidationStatus),
+		requests:      make(map[string]processedOrderRequest),
+		requestOrders: make(map[uuid.UUID]string),
+		requestLimit:  100000,
 	}
 	me.tradeBacklogLimit = int64(tradeBufferSize)
 	if me.tradeBacklogLimit < 1 {
@@ -189,20 +196,21 @@ func (me *MatchingEngine) matchingLoop() {
 }
 
 // processOrder handles a single order
-func (me *MatchingEngine) processOrder(order *Order) {
+func (me *MatchingEngine) processOrder(order *Order) error {
 	if !me.priceFeedReady(order.Symbol) || !me.accountPriceFeedsReady(order.ClientID) {
 		order.Status = Rejected
-		return
+		return ErrPriceUnavailable
 	}
-	if me.hasActiveOrder(order.ID, order.Symbol) {
+	_, processed := me.requestOrders[order.ID]
+	if processed || me.hasActiveOrder(order.ID, order.Symbol) {
 		order.Status = Rejected
-		return
+		return ErrOrderIDConflict
 	}
 	// Perform risk checks before processing
 	riskResult := me.riskManager.checkAndReserveOrder(order)
 	if !riskResult.Approved {
 		order.Status = Rejected
-		return
+		return fmt.Errorf("%w: %s", ErrOrderRejected, riskResult.Reason)
 	}
 
 	defer me.cancelUndermarginedOrders()
@@ -214,17 +222,19 @@ func (me *MatchingEngine) processOrder(order *Order) {
 	// Handle stop orders
 	if order.Type == StopMarket || order.Type == StopLimit {
 		me.addStopOrder(order)
-		return
+		return nil
 	}
 
 	// Market orders are matched immediately
 	if order.Type == Market {
 		me.matchMarketOrder(book, order)
-		return
+	} else {
+		me.matchLimitOrder(book, order)
 	}
-
-	// Limit orders are added to the book and matched if possible
-	me.matchLimitOrder(book, order)
+	if order.Status == Rejected {
+		return ErrOrderRejected
+	}
+	return nil
 }
 
 func (me *MatchingEngine) hasActiveOrder(orderID uuid.UUID, symbol string) bool {

@@ -18,6 +18,41 @@ Um motor de matching de ordens de alta performance em Go, projetado para latênc
 
 ## Arquitetura
 
+### Solicitações idempotentes e entrada HTTP
+
+`SubmitOrderRequest(ctx, key, order)` processa uma ordem no mesmo dono mutável do matching e retorna um recibo e um indicador de replay. A chave tem de 1 a 128 caracteres ASCII visíveis, sem espaços. Ela é global ao motor: os dados da ordem, incluindo cliente, ID, campos ignorados pelo tipo e timestamp, ficam vinculados à primeira solicitação processada. Na entrada HTTP, timestamp e estado inicial são definidos pelo contrato, sem campos livres para o cliente.
+
+- Mesma chave e mesmos dados: retorna o recibo original, inclusive depois de fill, rejeição ou cancelamento, sem repetir risco, reserva, negócio ou contadores.
+- Mesma chave com dados diferentes, ou mesmo ID de ordem com outra chave: conflito. O registro anterior permanece intacto.
+- Validação estrutural, fila cheia e backlog de publicação não consomem a chave. Uma rejeição financeira já processada fica registrada; um novo intento após reforço de garantia precisa de nova chave e novo ID.
+- Cancelamento ou fechamento do motor depois de enfileirar pode retornar `ErrRequestOutcomeUnknown`. O cliente deve repetir **a mesma chave e os mesmos dados**. Um timeout não prova que a ordem não executou.
+
+O recibo registra o resultado **da submissão original**, com sequência, estado inicial, quantidades executada e restante e motivo de rejeição. Não é uma consulta ao estado atual da ordem. Uma market pode executar parcialmente e rejeitar o restante; as quantidades do recibo preservam essa distinção. A sequência representa solicitações processadas, não um log durável de eventos de mercado.
+
+Os registros ficam em memória durante a execução do motor, sem TTL ou remoção silenciosa. A capacidade padrão é de 100.000 registros; `SetOrderRequestCapacity` permite ajustá-la, sem reduzir abaixo do histórico retido. Ao atingir a capacidade, novas chaves são recusadas e recibos existentes continuam disponíveis quando a fila admite a consulta. As APIs antigas de submissão permanecem assíncronas e não criam recibos; um ID já registrado no caminho idempotente também não pode ser reexecutado por elas.
+
+**Persistência ainda pendente:** reiniciar perde tanto o histórico de idempotência quanto o estado financeiro e os books. A garantia desta etapa vale dentro da mesma execução e não substitui registro durável, replay ou publicação transacional. Esse é o próximo incremento necessário antes de atravessar reinícios com segurança.
+
+`NewOrderHTTPHandler(engine)` fornece um `http.Handler` para um motor de derivativos previamente configurado com clientes e instrumentos. Este incremento fornece o componente e testes HTTP locais; não inicia um listener nem altera a execução da demo. Autenticação, autorização, configuração de um servidor persistente e exposição externa continuam pendentes. `client_id` identifica uma conta já cadastrada e não autentica o chamador.
+
+O endpoint é `POST /orders`, com `Content-Type: application/json` e um único cabeçalho `Idempotency-Key`. O corpo tem no máximo 4 KiB. O parser rejeita campos desconhecidos, duplicados, nomes com outra capitalização, JSON adicional e valores monetários/quantidades fora do formato inteiro. Preços e quantidades são **strings decimais de inteiros na escala configurada**, evitando perda de precisão em clientes com números de ponto flutuante.
+
+```json
+{
+  "order_id": "a79c1d57-0b06-4de7-bc83-00802d7c9ac0",
+  "client_id": "755b2162-9ab3-4a0b-a48f-571def953639",
+  "symbol": "SIM-FUT",
+  "side": "buy",
+  "type": "limit",
+  "quantity": "1",
+  "price": "100"
+}
+```
+
+`side` aceita `buy`/`sell`; `type` aceita `limit`, `market`, `stop_market` e `stop_limit`. Stops também exigem `stop_price`. HTTP 200 significa **solicitação processada**: consultar `initial_status`, `filled_quantity`, `remaining_quantity` e `rejection_reason` para saber o resultado financeiro. O corpo é idêntico nos reenvios; `Idempotency-Replayed` distingue primeira resposta de replay. Conflitos retornam 409, backpressure/capacidade 429 com `Retry-After`, resultado incerto 504 e motor fechado 503. Erros de formato usam 400/413/415; um contexto cancelado antes da fila usa 408. Respostas não devem ser armazenadas por caches HTTP.
+
+O ensaio de [dez mil chamadas HTTP](LOAD_TEST_RESULTS.md) usa 64 trabalhadores, 2.500 ordens distintas e 7.500 reenvios. Ele verifica 1.250 negócios únicos, conservação de patrimônio, posições, margem e ausência de reservas residuais. A meta experimental é p95 até 100 ms no ensaio local sem instrumentação; não representa capacidade sustentada ou SLA de produção.
+
 ### Padrão monetário
 
 Os valores financeiros usam **inteiros com escala explícita**, sem `float32`/`float64` ou BigDecimal. Preços e garantias não negativos usam `uint64`; patrimônio e P&L usam `int64` na faixa simétrica suportada. Somas intermediárias de P&L e conversões do feed usam `big.Int`; valores fora da faixa são rejeitados. Essa representação fixa mantém a aritmética exata para as unidades suportadas.
