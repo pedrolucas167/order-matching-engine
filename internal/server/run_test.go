@@ -123,6 +123,9 @@ func TestServiceRunPersistsOrdersAndDoesNotResetFunding(t *testing.T) {
 
 func TestRunRejectsInvalidOptionsAndSecrets(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
+	if err := Run(context.Background(), []string{"-shutdown-timeout", "0s"}, logger); err == nil {
+		t.Fatal("nonpositive shutdown deadline was accepted")
+	}
 	config := writeTestConfig(t, testConfig())
 	db := filepath.Join(t.TempDir(), "engine.db")
 	t.Setenv("ORDER_API_TOKEN", testOperatorToken)
