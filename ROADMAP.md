@@ -8,6 +8,8 @@ As regras oficiais da [Coinbase](https://www.coinbase.com/legal/trading_rules) d
 
 ## Entregas concluídas
 
+- Serviço HTTP durável executável em `cmd/order-server`, com token de operador, consultas financeiras, cancelamentos, marcação manual e confirmação da outbox; imagem Linux/amd64 e fluxo de teste/publicação no GHCR. O serviço não inicia cenários de demonstração. Autorização por cliente, TLS externo e integração do feed durável continuam pendentes.
+
 - Pacotes de projeto separados: núcleo em `internal/matching`, adaptador em `internal/httpapi` e demo em `internal/demo`, com executável em `cmd/order-demo`. As fronteiras preservam o dono único do estado e o formato persistente.
 
 - Matching com um único dono mutável, cópias independentes de entradas e consultas, cancelamentos serializados e execução de stops no mesmo loop.
@@ -29,7 +31,7 @@ A etapa 1 fica dividida em **1a: posições, margem inicial e reservas** e **1b:
 
 ## Etapas e critérios de conclusão
 
-O incremento anterior acrescentou recibos idempotentes e um handler HTTP com teste de 10.000 chamadas. O incremento atual acrescenta um perfil durável explícito: snapshot transacional em bbolt antes de confirmar a solicitação, recuperação financeira e outbox com confirmação cumulativa. A etapa 2 tem agora uma base implementada; histórico imutável de comandos, migrações, backup operacional, medições de disco e integração do feed externo continuam pendentes. A interface da etapa 4 também é parcial: sem autenticação, consulta HTTP de estado atual ou servidor externo implantado. Ver [contrato de recuperação](DURABLE_RECOVERY.md).
+Os incrementos anteriores acrescentaram recibos idempotentes, um ensaio de 10.000 chamadas e um perfil durável: snapshot transacional em bbolt antes de confirmar a solicitação, recuperação financeira e outbox com confirmação cumulativa. A etapa 2 tem uma base implementada; histórico imutável de comandos, migrações, backup operacional, medições de disco e integração do feed externo continuam pendentes. A etapa 4 agora inclui serviço executável, token de operador e consultas HTTP de estado atual; autorização por cliente, TLS e implantação externa continuam pendentes. Ver [contrato de recuperação](DURABLE_RECOVERY.md) e [guia do serviço](CONTAINER_SERVICE.md).
 
 | Etapa | Resultado esperado | Critério de conclusão |
 | --- | --- | --- |
