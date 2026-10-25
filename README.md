@@ -4,6 +4,10 @@ Um motor de matching de ordens de alta performance em Go, projetado para latênc
 
 ## Funcionalidades
 
+### Serviço em contêiner
+
+`cmd/order-server` executa uma API HTTP autenticada com motor durável, configuração de contas/instrumentos e outbox de negócios. A imagem roda como usuário sem privilégios e mantém o banco em volume. O [guia do serviço](CONTAINER_SERVICE.md) cobre configuração, execução com Docker Compose, endpoints e publicação no GitHub Packages. O comando `cmd/order-demo` continua separado.
+
 ### Core Functionality
 - **Price-Time Priority (FIFO)**: Ordens são matcheadas pelo melhor preço; no mesmo preço, seguem a ordem de processamento no loop
 - **Limit & Market Orders**: Suporte para ambos os tipos de ordens
@@ -18,7 +22,7 @@ Um motor de matching de ordens de alta performance em Go, projetado para latênc
 
 ## Arquitetura
 
-O módulo é `github.com/pedrolucas167/order-matching-engine`. O núcleo fica em `internal/matching`; os adaptadores HTTP ficam em `internal/httpapi`, e a demonstração em `internal/demo`, executada pelo comando `cmd/order-demo`.
+O módulo é `github.com/pedrolucas167/order-matching-engine`. O núcleo fica em `internal/matching`; os adaptadores HTTP ficam em `internal/httpapi`, e a demonstração em `internal/demo`, executada pelo comando `cmd/order-demo`. `internal/server` configura e inicia o serviço persistente por `cmd/order-server`.
 
 `matching` mantém a posse do estado mutável e reúne matching, risco, feeds e recuperação transacional. `httpapi` depende apenas de seu contrato público. A demo também usa esse contrato; o núcleo não depende dos adaptadores nem do executável. Os testes ficam junto das responsabilidades que validam.
 
@@ -37,7 +41,7 @@ Nos construtores em memória, os registros ficam durante a execução do motor, 
 
 Para preservar recibos, books e estado financeiro após reinício, usar o perfil explícito `NewDurableDerivativesMatchingEngine`. Ele grava um snapshot transacional antes de confirmar a solicitação e mantém uma outbox de negócios com confirmação do consumidor. Os construtores em memória conservam seu contrato anterior. O [contrato de recuperação durável](DURABLE_RECOVERY.md) detalha abertura, falhas, retomada e limites.
 
-`httpapi.NewOrderHTTPHandler(engine)` fornece um `http.Handler` para um motor de derivativos previamente configurado com clientes e instrumentos. Este incremento fornece o componente e testes HTTP locais; não inicia um listener nem altera a execução da demo. Autenticação, autorização, configuração de um servidor persistente e exposição externa continuam pendentes. `client_id` identifica uma conta já cadastrada e não autentica o chamador.
+`httpapi.NewOrderHTTPHandler(engine)` fornece um `http.Handler` para um motor de derivativos previamente configurado com clientes e instrumentos. O serviço `cmd/order-server` usa o perfil durável e envolve esse adaptador com autenticação por token de operador e consultas financeiras. `client_id` identifica uma conta já cadastrada; o token dá acesso operacional a todas as contas. Autorização por cliente, TLS e implantação externa continuam pendentes.
 
 O endpoint é `POST /orders`, com `Content-Type: application/json` e um único cabeçalho `Idempotency-Key`. O corpo tem no máximo 4 KiB. O parser rejeita campos desconhecidos, duplicados, nomes com outra capitalização, JSON adicional e valores monetários/quantidades fora do formato inteiro. Preços e quantidades são **strings decimais de inteiros na escala configurada**, evitando perda de precisão em clientes com números de ponto flutuante.
 
@@ -331,11 +335,13 @@ Os testes cobrem matching, stops e cancelamentos concorrentes, execução única
 ```
 Order Matching Engine/
 ├── cmd/
-│   └── order-demo/main.go
+│   ├── order-demo/main.go
+│   └── order-server/main.go
 ├── internal/
 │   ├── matching/       # Motor, risco, idempotência, feed e recuperação
 │   ├── httpapi/        # Contrato HTTP e testes de integração/carga
-│   └── demo/           # Cenários e formatação monetária
+│   ├── demo/           # Cenários e formatação monetária
+│   └── server/         # Configuração, inicialização e ciclo de vida do serviço
 ├── go.mod
 ├── README.md
 ├── DURABLE_RECOVERY.md

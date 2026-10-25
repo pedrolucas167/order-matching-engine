@@ -348,6 +348,19 @@ func (durable *DurableMatchingEngine) GetMarginAccount(id uuid.UUID) (MarginAcco
 	return account, nil
 }
 
+func (durable *DurableMatchingEngine) GetClient(id uuid.UUID) (Client, error) {
+	durable.mu.Lock()
+	defer durable.mu.Unlock()
+	if err := durable.healthError(); err != nil {
+		return Client{}, err
+	}
+	client, exists := durable.engine.riskManager.GetClient(id)
+	if !exists {
+		return Client{}, ErrClientNotFound
+	}
+	return *client, nil
+}
+
 func (durable *DurableMatchingEngine) GetDerivativePosition(id uuid.UUID, symbol string) (DerivativePosition, bool, error) {
 	durable.mu.Lock()
 	defer durable.mu.Unlock()

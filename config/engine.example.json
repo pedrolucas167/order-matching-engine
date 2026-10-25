@@ -1,0 +1,23 @@
+{
+  "instruments": [
+    {
+      "symbol": "SIM-FUT",
+      "margin_currency": "SIM",
+      "initial_margin_per_contract": "100",
+      "maintenance_margin_per_contract": "80",
+      "contract_multiplier": "1"
+    }
+  ],
+  "clients": [
+    {
+      "id": "755b2162-9ab3-4a0b-a48f-571def953639",
+      "margin_currency": "SIM",
+      "initial_collateral": "1000000"
+    },
+    {
+      "id": "a79c1d57-0b06-4de7-bc83-00802d7c9ac0",
+      "margin_currency": "SIM",
+      "initial_collateral": "1000000"
+    }
+  ]
+}
