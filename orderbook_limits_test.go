@@ -15,7 +15,7 @@ func TestDerivativePriceLevelOverflowRejectsAndReleasesRemainder(t *testing.T) {
 	}
 	clients := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
 	for _, id := range clients {
-		if err := engine.GetRiskManager().AddClient(&Client{ID: id, Collateral: math.MaxUint64, MarginCurrency: "SIM"}); err != nil {
+		if err := engine.GetRiskManager().AddClient(&Client{ID: id, Collateral: math.MaxInt64, MarginCurrency: "SIM"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -29,7 +29,7 @@ func TestDerivativePriceLevelOverflowRejectsAndReleasesRemainder(t *testing.T) {
 		t.Fatalf("price level quantity overflowed: total=%d orders=%d", snapshot.BestAsk.TotalQty, len(snapshot.BestAsk.Orders))
 	}
 	account, _ := engine.GetRiskManager().GetMarginAccount(clients[2])
-	if account.OrderMargin != 0 || account.AvailableCollateral != math.MaxUint64 {
+	if account.OrderMargin != 0 || account.AvailableCollateral != math.MaxInt64 {
 		t.Fatalf("unrested quantity retained margin: %+v", account)
 	}
 	if _, exists := engine.GetOrderBook("SIM-FUT").GetOrder(rejected.ID); exists {

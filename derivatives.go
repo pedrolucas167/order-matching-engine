@@ -4,28 +4,39 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"strings"
 
 	"github.com/google/uuid"
 )
 
 type DerivativeInstrument struct {
-	Symbol                   string
-	MarginCurrency           string
-	InitialMarginPerContract uint64
+	Symbol                       string
+	MarginCurrency               string
+	InitialMarginPerContract     uint64
+	MaintenanceMarginPerContract uint64
+	ContractMultiplier           uint64
 }
 
 type DerivativePosition struct {
 	NetContracts      int64
 	OpenBuyContracts  uint64
 	OpenSellContracts uint64
+	RealizedPnL       int64
+	UnrealizedPnL     int64
 }
 
 type MarginAccount struct {
-	Collateral          uint64
-	PositionMargin      uint64
-	OrderMargin         uint64
-	AvailableCollateral uint64
+	Collateral                 uint64
+	PositionMargin             uint64
+	OrderMargin                uint64
+	AvailableCollateral        uint64
+	RealizedPnL                int64
+	UnrealizedPnL              int64
+	Equity                     int64
+	MaintenanceMargin          uint64
+	InitialMarginShortfall     uint64
+	MaintenanceMarginShortfall uint64
 }
 
 type derivativeOrderKey struct {
@@ -46,6 +57,7 @@ type marginRequirement struct {
 }
 
 var (
+	ErrUnknownMarkPrice                = errors.New("mark price must be positive and known")
 	ErrInsufficientMargin              = errors.New("insufficient available margin")
 	ErrMarginCurrencyMismatch          = errors.New("margin currency does not match the account")
 	ErrUnknownDerivativeInstrument     = errors.New("unknown derivative instrument")
@@ -60,6 +72,15 @@ var (
 func (rm *RiskManager) addDerivativeInstrument(instrument DerivativeInstrument) error {
 	if !rm.derivativesEnabled {
 		return errors.New("derivative instruments require a derivatives engine")
+	}
+	if instrument.ContractMultiplier == 0 {
+		instrument.ContractMultiplier = 1
+	}
+	if instrument.MaintenanceMarginPerContract == 0 {
+		instrument.MaintenanceMarginPerContract = instrument.InitialMarginPerContract
+	}
+	if instrument.ContractMultiplier > math.MaxInt64 || instrument.MaintenanceMarginPerContract > instrument.InitialMarginPerContract {
+		return ErrInvalidDerivativeInstrument
 	}
 	if instrument.Symbol == "" || strings.TrimSpace(instrument.Symbol) != instrument.Symbol || instrument.MarginCurrency == "" || strings.TrimSpace(instrument.MarginCurrency) != instrument.MarginCurrency || instrument.InitialMarginPerContract == 0 {
 		return ErrInvalidDerivativeInstrument
@@ -123,41 +144,57 @@ func addMarginRequirement(account *MarginAccount, requirement marginRequirement)
 	return nil
 }
 
-func (rm *RiskManager) calculateMarginAccountLocked(clientID uuid.UUID, replacementSymbol string, replacement *DerivativePosition) (MarginAccount, error) {
+func (rm *RiskManager) calculateMarginAccountLocked(clientID uuid.UUID, replacementSymbol string, replacement *DerivativePosition, replacementLots []DerivativeLot) (MarginAccount, error) {
 	client, exists := rm.clients[clientID]
 	if !exists {
 		return MarginAccount{}, ErrClientNotFound
 	}
+	if client.Collateral > math.MaxInt64 {
+		return MarginAccount{}, ErrRiskArithmeticOverflow
+	}
 	account := MarginAccount{Collateral: client.Collateral}
+	totals := pnlTotals{}
 	for symbol, position := range rm.derivativePositions[clientID] {
 		if replacement != nil && symbol == replacementSymbol {
 			continue
 		}
-		requirement, err := calculatePositionMargin(position, rm.derivativeInstruments[symbol].InitialMarginPerContract)
-		if err != nil {
-			return MarginAccount{}, err
-		}
-		if err := addMarginRequirement(&account, requirement); err != nil {
+		if err := rm.addValuedPositionLocked(&account, symbol, position, rm.derivativeLots[clientID][symbol], &totals); err != nil {
 			return MarginAccount{}, err
 		}
 	}
 	if replacement != nil {
-		requirement, err := calculatePositionMargin(*replacement, rm.derivativeInstruments[replacementSymbol].InitialMarginPerContract)
-		if err != nil {
-			return MarginAccount{}, err
-		}
-		if err := addMarginRequirement(&account, requirement); err != nil {
+		if err := rm.addValuedPositionLocked(&account, replacementSymbol, *replacement, replacementLots, &totals); err != nil {
 			return MarginAccount{}, err
 		}
 	}
 	if account.PositionMargin > math.MaxUint64-account.OrderMargin {
 		return MarginAccount{}, ErrRiskArithmeticOverflow
 	}
-	required := account.PositionMargin + account.OrderMargin
-	if required > account.Collateral {
-		return MarginAccount{}, ErrInsufficientMargin
+	var err error
+	account.RealizedPnL, err = signedMoney(&totals.realized)
+	if err != nil {
+		return MarginAccount{}, err
 	}
-	account.AvailableCollateral = account.Collateral - required
+	account.UnrealizedPnL, err = signedMoney(&totals.unrealized)
+	if err != nil {
+		return MarginAccount{}, err
+	}
+	equity := big.NewInt(int64(account.Collateral))
+	equity.Add(equity, &totals.realized)
+	equity.Add(equity, &totals.unrealized)
+	account.Equity, err = signedMoney(equity)
+	if err != nil {
+		return MarginAccount{}, err
+	}
+	required := account.PositionMargin + account.OrderMargin
+	if required > math.MaxInt64 {
+		return MarginAccount{}, ErrRiskArithmeticOverflow
+	}
+	account.InitialMarginShortfall = marginShortfall(required, account.Equity)
+	account.MaintenanceMarginShortfall = marginShortfall(account.MaintenanceMargin, account.Equity)
+	if account.Equity > 0 && uint64(account.Equity) > required {
+		account.AvailableCollateral = uint64(account.Equity) - required
+	}
 	return account, nil
 }
 
@@ -177,7 +214,8 @@ func (rm *RiskManager) checkDerivativeOrderLocked(order *Order, reserve bool) er
 	if _, exists := rm.derivativeReservations[key]; exists {
 		return errors.New("order already has a margin reservation")
 	}
-	position := rm.derivativePositions[order.ClientID][order.Symbol]
+	currentPosition := rm.derivativePositions[order.ClientID][order.Symbol]
+	position := currentPosition
 	if order.Remaining > math.MaxInt64 {
 		return ErrRiskArithmeticOverflow
 	}
@@ -199,7 +237,7 @@ func (rm *RiskManager) checkDerivativeOrderLocked(order *Order, reserve bool) er
 	rm.limitsMu.RLock()
 	limits, hasLimits := rm.riskLimits[order.ClientID]
 	rm.limitsMu.RUnlock()
-	if hasLimits {
+	if hasLimits && !isClosingMarketOrder(order, currentPosition) {
 		if limits.MaxPositionSize > 0 && requirement.MaximumContracts > limits.MaxPositionSize {
 			return ErrPositionLimitExceeded
 		}
@@ -211,8 +249,12 @@ func (rm *RiskManager) checkDerivativeOrderLocked(order *Order, reserve bool) er
 			return errors.New("daily volume limit includes pending derivative orders")
 		}
 	}
-	if _, err := rm.calculateMarginAccountLocked(order.ClientID, order.Symbol, &position); err != nil {
+	account, err := rm.calculateMarginAccountLocked(order.ClientID, order.Symbol, &position, rm.derivativeLots[order.ClientID][order.Symbol])
+	if err != nil {
 		return err
+	}
+	if account.InitialMarginShortfall > 0 && !isClosingMarketOrder(order, currentPosition) {
+		return ErrInsufficientMargin
 	}
 	if reserve {
 		if rm.derivativePositions[order.ClientID] == nil {
@@ -280,21 +322,30 @@ func (rm *RiskManager) settleTrade(trade *Trade) error {
 	}
 	bidPosition := rm.derivativePositions[trade.BidClient][trade.Symbol]
 	askPosition := rm.derivativePositions[trade.AskClient][trade.Symbol]
-	var err error
-	bidPosition.NetContracts, err = changeNetContracts(bidPosition.NetContracts, trade.Quantity, Bid)
+	bidPosition, bidLots, err := applyDerivativeFill(bidPosition, rm.derivativeLots[trade.BidClient][trade.Symbol], Bid, trade.Quantity, trade.Price, rm.derivativeInstruments[trade.Symbol].ContractMultiplier)
 	if err != nil {
 		return err
 	}
-	askPosition.NetContracts, err = changeNetContracts(askPosition.NetContracts, trade.Quantity, Ask)
+	askPosition, askLots, err := applyDerivativeFill(askPosition, rm.derivativeLots[trade.AskClient][trade.Symbol], Ask, trade.Quantity, trade.Price, rm.derivativeInstruments[trade.Symbol].ContractMultiplier)
 	if err != nil {
 		return err
 	}
 	bidPosition.OpenBuyContracts -= trade.Quantity
 	askPosition.OpenSellContracts -= trade.Quantity
-	if _, err := rm.calculateMarginAccountLocked(trade.BidClient, trade.Symbol, &bidPosition); err != nil {
+	_, hadMark := rm.derivativeMarks[trade.Symbol]
+	if !hadMark {
+		rm.derivativeMarks[trade.Symbol] = trade.Price
+	}
+	committed := false
+	defer func() {
+		if !committed && !hadMark {
+			delete(rm.derivativeMarks, trade.Symbol)
+		}
+	}()
+	if _, err := rm.calculateMarginAccountLocked(trade.BidClient, trade.Symbol, &bidPosition, bidLots); err != nil {
 		return err
 	}
-	if _, err := rm.calculateMarginAccountLocked(trade.AskClient, trade.Symbol, &askPosition); err != nil {
+	if _, err := rm.calculateMarginAccountLocked(trade.AskClient, trade.Symbol, &askPosition, askLots); err != nil {
 		return err
 	}
 	rm.volumeMu.Lock()
@@ -306,6 +357,8 @@ func (rm *RiskManager) settleTrade(trade *Trade) error {
 	}
 	rm.derivativePositions[trade.BidClient][trade.Symbol] = bidPosition
 	rm.derivativePositions[trade.AskClient][trade.Symbol] = askPosition
+	rm.storeDerivativeLotsLocked(trade.BidClient, trade.Symbol, bidLots)
+	rm.storeDerivativeLotsLocked(trade.AskClient, trade.Symbol, askLots)
 	bidReservation.Remaining -= trade.Quantity
 	askReservation.Remaining -= trade.Quantity
 	if bidReservation.Remaining == 0 {
@@ -320,6 +373,7 @@ func (rm *RiskManager) settleTrade(trade *Trade) error {
 	}
 	rm.dailyVolume[trade.BidClient][trade.Symbol] = bidVolume + trade.Quantity
 	rm.dailyVolume[trade.AskClient][trade.Symbol] = askVolume + trade.Quantity
+	committed = true
 	return nil
 }
 
@@ -327,6 +381,13 @@ func (rm *RiskManager) GetDerivativePosition(clientID uuid.UUID, symbol string) 
 	rm.accountMu.RLock()
 	defer rm.accountMu.RUnlock()
 	position, exists := rm.derivativePositions[clientID][symbol]
+	if exists {
+		pnl, err := positionPnL(position, rm.derivativeLots[clientID][symbol], rm.derivativeMarks[symbol], rm.derivativeInstruments[symbol].ContractMultiplier)
+		if err != nil {
+			return DerivativePosition{}, false
+		}
+		position.UnrealizedPnL = pnl
+	}
 	return position, exists
 }
 
@@ -336,6 +397,6 @@ func (rm *RiskManager) GetMarginAccount(clientID uuid.UUID) (MarginAccount, bool
 	}
 	rm.accountMu.RLock()
 	defer rm.accountMu.RUnlock()
-	account, err := rm.calculateMarginAccountLocked(clientID, "", nil)
+	account, err := rm.calculateMarginAccountLocked(clientID, "", nil, nil)
 	return account, err == nil
 }

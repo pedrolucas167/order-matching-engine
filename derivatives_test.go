@@ -170,17 +170,17 @@ func TestDerivativePositionAndVolumeLimitsIncludeOpenOrders(t *testing.T) {
 
 func TestDerivativeArithmeticBoundsRejectWithoutMutation(t *testing.T) {
 	t.Run("marginMultiplication", func(t *testing.T) {
-		manager, buyer, _ := newDerivativeRiskTest(t, math.MaxUint64, math.MaxUint64)
-		if result := manager.checkAndReserveOrder(derivativeTestOrder(buyer, Bid, 2)); result.Approved {
+		manager, buyer, _ := newDerivativeRiskTest(t, math.MaxInt64, math.MaxInt64)
+		if result := manager.checkAndReserveOrder(derivativeTestOrder(buyer, Bid, 3)); result.Approved {
 			t.Fatal("overflowing margin accepted")
 		}
 		account, _ := manager.GetMarginAccount(buyer)
-		if account.OrderMargin != 0 || account.AvailableCollateral != math.MaxUint64 {
+		if account.OrderMargin != 0 || account.AvailableCollateral != math.MaxInt64 {
 			t.Fatal("overflow changed margin")
 		}
 	})
 	t.Run("signedContracts", func(t *testing.T) {
-		manager, buyer, _ := newDerivativeRiskTest(t, 1, math.MaxUint64)
+		manager, buyer, _ := newDerivativeRiskTest(t, 1, math.MaxInt64)
 		reserveDerivativeTestOrder(t, manager, derivativeTestOrder(buyer, Bid, math.MaxInt64))
 		if result := manager.checkAndReserveOrder(derivativeTestOrder(buyer, Bid, 1)); result.Approved {
 			t.Fatal("overflowing potential position accepted")
@@ -254,7 +254,7 @@ func TestDerivativeConfigurationAndClientRequirements(t *testing.T) {
 }
 
 func TestDerivativePortfolioMarginSumCannotOverflow(t *testing.T) {
-	manager, buyer, _ := newDerivativeRiskTest(t, math.MaxUint64, math.MaxUint64)
+	manager, buyer, _ := newDerivativeRiskTest(t, math.MaxInt64, math.MaxInt64)
 	reserveDerivativeTestOrder(t, manager, derivativeTestOrder(buyer, Bid, 1))
 	if err := manager.addDerivativeInstrument(DerivativeInstrument{Symbol: "OTHER-FUT", MarginCurrency: "SIM", InitialMarginPerContract: 1}); err != nil {
 		t.Fatal(err)
@@ -265,7 +265,7 @@ func TestDerivativePortfolioMarginSumCannotOverflow(t *testing.T) {
 		t.Fatal("portfolio margin sum overflow was accepted")
 	}
 	account, _ := manager.GetMarginAccount(buyer)
-	if account.OrderMargin != math.MaxUint64 || account.AvailableCollateral != 0 {
+	if account.OrderMargin != math.MaxInt64 || account.AvailableCollateral != 0 {
 		t.Fatal("margin sum overflow changed the account")
 	}
 }
