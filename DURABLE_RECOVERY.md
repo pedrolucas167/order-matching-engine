@@ -7,19 +7,21 @@
 O construtor retorna `*DurableMatchingEngine`. Configuração, submissão e consultas usam os métodos desse perfil, que serializa alterações e consultas para impedir a exposição de um estado ainda não gravado. Ele não expõe um `RiskManager` mutável nem uma submissão sem recibo. Cadastros e aportes iniciais devem ser aplicados somente quando ainda não existirem; reaplicar uma garantia-base ao reabrir representa uma nova alteração financeira.
 
 ```go
-engine, err := NewDurableDerivativesMatchingEngine("state.db", 512, 512)
+engine, err := matching.NewDurableDerivativesMatchingEngine("state.db", 512, 512)
 if err != nil {
     return err
 }
 defer engine.Close()
 
-handler, err := NewDurableOrderHTTPHandler(engine)
+handler, err := httpapi.NewDurableOrderHTTPHandler(engine)
 if err != nil {
     return err
 }
 // Montar handler em um servidor local com timeouts configurados.
 _ = handler
 ```
+
+Os exemplos usam os imports `github.com/pedrolucas167/order-matching-engine/internal/matching` e `github.com/pedrolucas167/order-matching-engine/internal/httpapi`, a partir de um comando deste módulo.
 
 O handler preserva o contrato HTTP existente: mesma chave e mesmos dados retornam o recibo original, inclusive após reinício, sem criar um novo negócio. O ID da ordem também continua reservado após cancelamento ou execução. Configurações e cancelamentos têm métodos próprios no perfil durável. Não há migração automática de um motor já em execução em memória para esse banco.
 

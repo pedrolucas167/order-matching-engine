@@ -1,4 +1,4 @@
-module awesomeProject
+module github.com/pedrolucas167/order-matching-engine
 
 go 1.27
 
