@@ -3,11 +3,17 @@ package main
 import (
 	"errors"
 	"math"
+	"math/bits"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+)
+
+var (
+	ErrInvalidRiskLimits     = errors.New("risk limits require a client ID and non-nil limits")
+	ErrInvalidCircuitBreaker = errors.New("invalid circuit breaker configuration")
 )
 
 type RiskManager struct {
@@ -107,19 +113,27 @@ func (rm *RiskManager) AddClient(client *Client) error {
 }
 
 // SetRiskLimits sets risk limits for a client
-func (rm *RiskManager) SetRiskLimits(clientID uuid.UUID, limits *RiskLimits) {
+func (rm *RiskManager) SetRiskLimits(clientID uuid.UUID, limits *RiskLimits) error {
+	if clientID == uuid.Nil || limits == nil {
+		return ErrInvalidRiskLimits
+	}
 	rm.limitsMu.Lock()
 	defer rm.limitsMu.Unlock()
 	copied := *limits
 	rm.riskLimits[clientID] = &copied
+	return nil
 }
 
 // AddCircuitBreaker adds a circuit breaker for a symbol
-func (rm *RiskManager) AddCircuitBreaker(breaker *CircuitBreaker) {
+func (rm *RiskManager) AddCircuitBreaker(breaker *CircuitBreaker) error {
+	if breaker == nil || breaker.Symbol == "" || strings.TrimSpace(breaker.Symbol) != breaker.Symbol || breaker.ThresholdPct == 0 || breaker.CooldownPeriod < 0 || breaker.State < CircuitBreakerClosed || breaker.State > CircuitBreakerHalfOpen {
+		return ErrInvalidCircuitBreaker
+	}
 	rm.breakerMu.Lock()
 	defer rm.breakerMu.Unlock()
 	copied := *breaker
 	rm.circuitBreakers[breaker.Symbol] = &copied
+	return nil
 }
 
 // CheckOrder performs all risk checks before allowing an order
@@ -392,9 +406,9 @@ func (rm *RiskManager) CheckCircuitBreakerTrigger(symbol string, price uint64) {
 	}
 
 	change := absDiff(price, breaker.LastPrice)
-	threshold := (breaker.LastPrice * breaker.ThresholdPct) / 100
-
-	if change >= threshold {
+	changeHigh, changeLow := bits.Mul64(change, 100)
+	thresholdHigh, thresholdLow := bits.Mul64(breaker.LastPrice, breaker.ThresholdPct)
+	if changeHigh > thresholdHigh || (changeHigh == thresholdHigh && changeLow >= thresholdLow) {
 		// Trigger circuit breaker
 		breaker.State = CircuitBreakerOpen
 		breaker.TriggerPrice = price

@@ -346,7 +346,10 @@ func main() {
 		MaxExposure:     50,
 		MaxPositionSize: 5000,
 	}
-	riskManager.SetRiskLimits(client2ID, limits)
+	if err := riskManager.SetRiskLimits(client2ID, limits); err != nil {
+		log.Printf("Failed to configure risk limits: %v", err)
+		return
+	}
 
 	breaker := &CircuitBreaker{
 		Symbol:         symbol3,
@@ -355,7 +358,10 @@ func main() {
 		LastPrice:      30000000,
 		CooldownPeriod: 30 * 1000000000,
 	}
-	riskManager.AddCircuitBreaker(breaker)
+	if err := riskManager.AddCircuitBreaker(breaker); err != nil {
+		log.Printf("Failed to configure circuit breaker: %v", err)
+		return
+	}
 
 	fmt.Printf("  Created %s with $10,000 collateral\n", client1.Name)
 	fmt.Printf("  Created %s with $10,000 collateral and strict limits\n", client2.Name)
