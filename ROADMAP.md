@@ -23,7 +23,7 @@ O primeiro incremento usa um perfil explícito de derivativos, com margem inicia
 
 Referências: [margem inicial e de manutenção na CME](https://www.cmegroup.com/solutions/risk-management/performance-bonds-margins/faq-performance-bonds-margins.html) e [finalidade das margens em futuros — CFTC](https://www.cftc.gov/LearnAndProtect/AdvisoriesAndArticles/economicpurpose.html).
 
-A etapa 1 fica dividida em **1a: posições, margem inicial e reservas** e **1b: resultado financeiro, ajuste por preço, margem de manutenção e resposta à insuficiência de margem**. O primeiro incremento implementa somente 1a. Não há ainda SPAN, compensação entre produtos, cálculo de P&L, ajuste diário ou liquidação automática.
+A etapa 1 fica dividida em **1a: posições, margem inicial e reservas** e **1b: resultado financeiro, ajuste por preço, margem de manutenção e resposta à insuficiência de margem**. A etapa 1a está implementada. A etapa 1b agora inclui multiplicador, lotes FIFO, P&L realizado/não realizado, marcação explícita, variação de liquidação manual, margem de manutenção e bloqueio de novo risco com cancelamento de pendências. Ainda não há SPAN, compensação entre produtos, alimentação automática de preços ou liquidação automática.
 
 ## Etapas e critérios de conclusão
 
@@ -53,7 +53,7 @@ O perfil financeiro é criado explicitamente por `NewDerivativesMatchingEngine`.
 
 A implementação reserva margem no mesmo fluxo serializado das ordens, liquida a quantidade das duas contrapartes antes de publicar o trade e libera reservas do restante em cancelamentos, rejeições e encerramento do motor. Fechar o motor não encerra posições: a margem de contratos já executados permanece comprometida. Esse comportamento continua sem flush ou recuperação durável.
 
-A próxima etapa financeira é **1b**, antes de considerar o modelo uma gestão completa de risco: definir multiplicador do contrato, preço de marcação, resultado realizado/não realizado, variação da garantia, margem de manutenção e política explícita para insuficiência. Taxas, proteção de preço e dados externos também precisam de contratos próprios.
+A etapa **1b**, detalhada abaixo, acrescenta multiplicador, marcação, resultado financeiro, variação de liquidação manual e controles de margem. Liquidação automática, taxas, proteção de preço e dados externos continuam precisando de contratos próprios antes de considerar o modelo uma gestão completa de risco.
 
 ## Lacunas identificadas no modelo anterior
 
@@ -67,3 +67,13 @@ A próxima etapa financeira é **1b**, antes de considerar o modelo uma gestão 
 A etapa 1 deve corrigir o modelo financeiro selecionado, sem reescrever simultaneamente matching, persistência e interfaces. Recuperação durável, mudanças na referência de stops e novos protocolos ficam para os incrementos correspondentes.
 
 No perfil novo, a reserva, as posições por instrumento e o limite de posição potencial endereçam as quatro primeiras lacunas acima. O modelo legado continua educativo e não deve ser utilizado como contabilidade financeira de derivativos. Referência dos stops e recuperação durável permanecem nas etapas futuras; não foram alteradas silenciosamente neste incremento.
+
+## Incremento 1b implementado nesta branch
+
+- Lotes FIFO mantêm custo de entrada exato, inclusive em fills parciais e reversões; os resultados têm sinal.
+- Marcação e variação de liquidação são comandos explícitos do mesmo dono do matching. Repetir uma liquidação no mesmo preço não duplica P&L.
+- Patrimônio incorpora aportes e resultados realizados/não realizados; déficits inicial e de manutenção são consultáveis mesmo quando o patrimônio é negativo.
+- Contas com déficit inicial têm ordens pendentes canceladas e podem reduzir posições por market, sem criar ou inverter exposição. Reforços de aporte são permitidos; retiradas que deixem déficit são recusadas.
+- Atualizações com overflow são atômicas, e somas de P&L não dependem da ordem de iteração dos instrumentos.
+
+O próximo passo financeiro é definir liquidação e proteção de preço antes de automatizá-las. Também permanecem pendentes calendário, feed de marcação, custódia/saques, taxas e integração a uma clearing. A variação implementada é uma simulação contábil manual, não transferência bancária nem homologação de mercado.
