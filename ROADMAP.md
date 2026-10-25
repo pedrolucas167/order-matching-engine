@@ -27,7 +27,7 @@ A etapa 1 fica dividida em **1a: posições, margem inicial e reservas** e **1b:
 
 ## Etapas e critérios de conclusão
 
-Incremento atual: recibos de submissão idempotentes, proteção contra reenvio após execução/cancelamento e um handler HTTP com teste de 10.000 chamadas. O histórico é limitado e permanece em memória; **a etapa 2 continua pendente**, pois ainda não existem aceitação durável, reconstrução de estado ou garantia através de reinícios. A interface da etapa 4 também é parcial: sem autenticação, consulta HTTP de estado atual ou servidor externo implantado.
+O incremento anterior acrescentou recibos idempotentes e um handler HTTP com teste de 10.000 chamadas. O incremento atual acrescenta um perfil durável explícito: snapshot transacional em bbolt antes de confirmar a solicitação, recuperação financeira e outbox com confirmação cumulativa. A etapa 2 tem agora uma base implementada; histórico imutável de comandos, migrações, backup operacional, medições de disco e integração do feed externo continuam pendentes. A interface da etapa 4 também é parcial: sem autenticação, consulta HTTP de estado atual ou servidor externo implantado. Ver [contrato de recuperação](DURABLE_RECOVERY.md).
 
 | Etapa | Resultado esperado | Critério de conclusão |
 | --- | --- | --- |
@@ -53,9 +53,9 @@ Neste incremento, a margem de ordens limit, market e stop depende da quantidade 
 
 O perfil financeiro é criado explicitamente por `NewDerivativesMatchingEngine`. `NewMatchingEngine` permanece como simulação educativa legada; os perfis não são misturados no mesmo motor. O primeiro perfil exige instrumentos e clientes cadastrados, posições com sinal e moeda de garantia compatível.
 
-A implementação reserva margem no mesmo fluxo serializado das ordens, liquida a quantidade das duas contrapartes antes de publicar o trade e libera reservas do restante em cancelamentos, rejeições e encerramento do motor. Fechar o motor não encerra posições: a margem de contratos já executados permanece comprometida. Esse comportamento continua sem flush ou recuperação durável.
+A implementação reserva margem no mesmo fluxo serializado das ordens e liquida a quantidade das duas contrapartes antes de publicar o trade. No perfil em memória, o encerramento libera reservas pendentes. No novo perfil durável, ordens e reservas gravadas são preservadas para retomada; negócios aguardam confirmação na outbox. Fechar o motor não encerra posições.
 
-A etapa **1b**, detalhada abaixo, acrescenta multiplicador, marcação, resultado financeiro, variação de liquidação manual e controles de margem. A liquidação opcional e os dados externos agora têm contratos explícitos no README. Taxas, garantias de execução, modelos de carteira e recuperação durável continuam pendentes.
+A etapa **1b**, detalhada abaixo, acrescenta multiplicador, marcação, resultado financeiro, variação de liquidação manual e controles de margem. A liquidação opcional e os dados externos têm contratos explícitos no README. Taxas, garantias de execução e modelos de carteira continuam pendentes. Recuperação local passa a existir pelo perfil durável.
 
 ## Lacunas identificadas no modelo anterior
 
@@ -68,7 +68,7 @@ A etapa **1b**, detalhada abaixo, acrescenta multiplicador, marcação, resultad
 
 A etapa 1 deve corrigir o modelo financeiro selecionado, sem reescrever simultaneamente matching, persistência e interfaces. Recuperação durável, mudanças na referência de stops e novos protocolos ficam para os incrementos correspondentes.
 
-No perfil novo, a reserva, as posições por instrumento e o limite de posição potencial endereçam as quatro primeiras lacunas acima. O modelo legado continua educativo e não deve ser utilizado como contabilidade financeira de derivativos. Referência dos stops e recuperação durável permanecem nas etapas futuras; não foram alteradas silenciosamente neste incremento.
+No perfil de derivativos, a reserva, as posições por instrumento e o limite de posição potencial endereçam as quatro primeiras lacunas acima. O modelo legado continua educativo e não deve ser utilizado como contabilidade financeira de derivativos. Referência dos stops permanece para evolução; recuperação local agora usa um construtor próprio, sem alterar silenciosamente o contrato dos perfis em memória.
 
 ## Incremento 1b implementado nesta branch
 
@@ -78,4 +78,4 @@ No perfil novo, a reserva, as posições por instrumento e o limite de posição
 - Contas com déficit inicial têm ordens pendentes canceladas e podem reduzir posições por market, sem criar ou inverter exposição. Reforços de aporte são permitidos; retiradas que deixem déficit são recusadas.
 - Atualizações com overflow são atômicas, e somas de P&L não dependem da ordem de iteração dos instrumentos.
 
-O incremento atual automatiza tentativas de fechamento por déficit de manutenção, usando liquidez local e banda de preço configurável, e integra polling público de mark price com escala inteira e validação temporal. Falta de liquidez preserva a posição residual; referências desatualizadas bloqueiam liquidação e suspendem o instrumento vinculado. Os parâmetros são explícitos e não reproduzem integralmente um mercado específico. Permanecem pendentes calendário, custódia/saques, taxas e integração a uma clearing. A variação implementada é uma simulação contábil manual, não transferência bancária nem homologação de mercado. O próximo passo estrutural é registro durável e recuperação (etapa 2).
+O incremento atual automatiza tentativas de fechamento por déficit de manutenção, usando liquidez local e banda de preço configurável, e integra polling público de mark price com escala inteira e validação temporal. Falta de liquidez preserva a posição residual; referências desatualizadas bloqueiam liquidação e suspendem o instrumento vinculado. Os parâmetros são explícitos e não reproduzem integralmente um mercado específico. Permanecem pendentes calendário, custódia/saques, taxas e integração a uma clearing. A variação implementada é uma simulação contábil manual, não transferência bancária nem homologação de mercado. A etapa 2 agora tem uma base de snapshot transacional e outbox; a evolução seguinte inclui histórico incremental, integração do feed e medições com armazenamento.
