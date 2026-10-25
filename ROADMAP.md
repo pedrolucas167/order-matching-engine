@@ -23,7 +23,7 @@ O primeiro incremento usa um perfil explícito de derivativos, com margem inicia
 
 Referências: [margem inicial e de manutenção na CME](https://www.cmegroup.com/solutions/risk-management/performance-bonds-margins/faq-performance-bonds-margins.html) e [finalidade das margens em futuros — CFTC](https://www.cftc.gov/LearnAndProtect/AdvisoriesAndArticles/economicpurpose.html).
 
-A etapa 1 fica dividida em **1a: posições, margem inicial e reservas** e **1b: resultado financeiro, ajuste por preço, margem de manutenção e resposta à insuficiência de margem**. A etapa 1a está implementada. A etapa 1b agora inclui multiplicador, lotes FIFO, P&L realizado/não realizado, marcação explícita, variação de liquidação manual, margem de manutenção e bloqueio de novo risco com cancelamento de pendências. Ainda não há SPAN, compensação entre produtos, alimentação automática de preços ou liquidação automática.
+A etapa 1 fica dividida em **1a: posições, margem inicial e reservas** e **1b: resultado financeiro, ajuste por preço, margem de manutenção e resposta à insuficiência de margem**. A etapa 1a está implementada. A etapa 1b inclui multiplicador, lotes FIFO, P&L realizado/não realizado, marcação explícita, variação de liquidação manual, margem de manutenção e bloqueio de novo risco com cancelamento de pendências. O incremento atual acrescenta liquidação automática opcional com proteção de preço e alimentação pública de mark price, com suspensão por falha ou atraso. Ainda não há SPAN ou compensação entre produtos.
 
 ## Etapas e critérios de conclusão
 
@@ -53,7 +53,7 @@ O perfil financeiro é criado explicitamente por `NewDerivativesMatchingEngine`.
 
 A implementação reserva margem no mesmo fluxo serializado das ordens, liquida a quantidade das duas contrapartes antes de publicar o trade e libera reservas do restante em cancelamentos, rejeições e encerramento do motor. Fechar o motor não encerra posições: a margem de contratos já executados permanece comprometida. Esse comportamento continua sem flush ou recuperação durável.
 
-A etapa **1b**, detalhada abaixo, acrescenta multiplicador, marcação, resultado financeiro, variação de liquidação manual e controles de margem. Liquidação automática, taxas, proteção de preço e dados externos continuam precisando de contratos próprios antes de considerar o modelo uma gestão completa de risco.
+A etapa **1b**, detalhada abaixo, acrescenta multiplicador, marcação, resultado financeiro, variação de liquidação manual e controles de margem. A liquidação opcional e os dados externos agora têm contratos explícitos no README. Taxas, garantias de execução, modelos de carteira e recuperação durável continuam pendentes.
 
 ## Lacunas identificadas no modelo anterior
 
@@ -76,4 +76,4 @@ No perfil novo, a reserva, as posições por instrumento e o limite de posição
 - Contas com déficit inicial têm ordens pendentes canceladas e podem reduzir posições por market, sem criar ou inverter exposição. Reforços de aporte são permitidos; retiradas que deixem déficit são recusadas.
 - Atualizações com overflow são atômicas, e somas de P&L não dependem da ordem de iteração dos instrumentos.
 
-O próximo passo financeiro é definir liquidação e proteção de preço antes de automatizá-las. Também permanecem pendentes calendário, feed de marcação, custódia/saques, taxas e integração a uma clearing. A variação implementada é uma simulação contábil manual, não transferência bancária nem homologação de mercado.
+O incremento atual automatiza tentativas de fechamento por déficit de manutenção, usando liquidez local e banda de preço configurável, e integra polling público de mark price com escala inteira e validação temporal. Falta de liquidez preserva a posição residual; referências desatualizadas bloqueiam liquidação e suspendem o instrumento vinculado. Os parâmetros são explícitos e não reproduzem integralmente um mercado específico. Permanecem pendentes calendário, custódia/saques, taxas e integração a uma clearing. A variação implementada é uma simulação contábil manual, não transferência bancária nem homologação de mercado. O próximo passo estrutural é registro durável e recuperação (etapa 2).
