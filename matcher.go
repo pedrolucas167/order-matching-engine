@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,7 +46,11 @@ func NewMatchingEngine(orderBufferSize, tradeBufferSize int) *MatchingEngine {
 
 func (me *MatchingEngine) SubmitOrder(order *Order) error {
 	if order == nil {
-		return errors.New("nil order")
+		return fmt.Errorf("%w: order is nil", ErrInvalidOrder)
+	}
+	copiedOrder := *order
+	if err := validateNewOrder(copiedOrder); err != nil {
+		return err
 	}
 	select {
 	case <-me.stop:
@@ -55,7 +60,6 @@ func (me *MatchingEngine) SubmitOrder(order *Order) error {
 	if me.pendingTradeCount.Load() >= me.tradeBacklogLimit {
 		return ErrBackpressure
 	}
-	copiedOrder := *order
 	select {
 	case <-me.stop:
 		return ErrEngineClosed
