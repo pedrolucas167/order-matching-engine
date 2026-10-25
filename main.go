@@ -331,8 +331,14 @@ func main() {
 		ShortPosition: 0,
 	}
 
-	riskManager.AddClient(client1)
-	riskManager.AddClient(client2)
+	if err := riskManager.AddClient(client1); err != nil {
+		log.Printf("Failed to register client: %v", err)
+		return
+	}
+	if err := riskManager.AddClient(client2); err != nil {
+		log.Printf("Failed to register client: %v", err)
+		return
+	}
 
 	limits := &RiskLimits{
 		MaxOrderSize:    1000,
