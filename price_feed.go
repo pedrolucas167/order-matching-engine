@@ -152,6 +152,12 @@ func fetchMarkPrice(ctx context.Context, client *http.Client, endpoint string, c
 	}
 	response, err := client.Do(request)
 	if err != nil {
+		if ctx.Err() != nil {
+			return 0, time.Time{}, ctx.Err()
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return 0, time.Time{}, context.DeadlineExceeded
+		}
 		return 0, time.Time{}, errors.New("price request failed")
 	}
 	defer response.Body.Close()
@@ -159,7 +165,16 @@ func fetchMarkPrice(ctx context.Context, client *http.Client, endpoint string, c
 		return 0, time.Time{}, fmt.Errorf("price response status %d", response.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 16385))
-	if err != nil || len(body) > 16384 {
+	if err != nil {
+		if ctx.Err() != nil {
+			return 0, time.Time{}, ctx.Err()
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return 0, time.Time{}, context.DeadlineExceeded
+		}
+		return 0, time.Time{}, ErrInvalidPriceFeed
+	}
+	if len(body) > 16384 {
 		return 0, time.Time{}, ErrInvalidPriceFeed
 	}
 	var payload struct {

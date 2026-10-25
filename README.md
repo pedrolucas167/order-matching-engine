@@ -18,6 +18,12 @@ Um motor de matching de ordens de alta performance em Go, projetado para latênc
 
 ## Arquitetura
 
+### Padrão monetário
+
+Os valores financeiros usam **inteiros com escala explícita**, sem `float32`/`float64` ou BigDecimal. Preços e garantias não negativos usam `uint64`; patrimônio e P&L usam `int64` na faixa simétrica suportada. Somas intermediárias de P&L e conversões do feed usam `big.Int`; valores fora da faixa são rejeitados. Essa representação fixa mantém a aritmética exata para as unidades suportadas.
+
+A demo usa uma unidade monetária igual a **1.000.000 unidades inteiras** e exibe sempre seis casas decimais, por divisão e resto, sem conversão para ponto flutuante ou arredondamento. No feed externo, `PriceScale` declara quantas unidades inteiras representam uma unidade do preço da fonte. Preços das ordens, margem por contrato, garantias e multiplicador precisam ser configurados em unidades compatíveis; o motor não converte moedas nem deduz escalas pelo símbolo. No perfil de derivativos, o multiplicador converte a variação de preço em unidades da moeda de margem por contrato.
+
 ### Estruturas de Dados
 - **Order**: Representa uma ordem de trading com ID, símbolo, lado, tipo, preço, quantidade
 - **OrderBook**: Mantém bids (max-heap) e asks (min-heap) para um único símbolo
@@ -147,7 +153,11 @@ err := engine.RunMarkPriceFeed(ctx, config)
 
 Vincular um feed cancela ordens e stops do instrumento até chegar a primeira referência válida. Falha ou atraso posterior cancela as pendências e suspende **todas** as novas ordens, inclusive fechamentos manuais, até a recuperação. Contas com posição aberta nesse instrumento também têm pendências canceladas e admissões suspensas nos demais instrumentos, pois seu patrimônio depende da referência indisponível. A última marcação é preservada para consulta, mas deve ser interpretada junto de `GetMarkPriceFeedStatus`: `Connected` indica a última consulta válida e `Fresh` indica validade temporal. A expiração é verificada antes de comandos e no ticker. Nenhum negócio já executado é revertido.
 
-Parar o contexto mantém o vínculo suspenso. Reiniciar é permitido após o retorno da chamada anterior, com a mesma fonte, símbolo e escala, preservando o último horário aceito. Chamadas simultâneas são recusadas. Marcação manual e variação de liquidação manual são recusadas enquanto existir o vínculo, evitando referências concorrentes. Fechar o motor cancela requisições em andamento; o chamador deve aguardar o retorno do feed. O preço é específico do provedor escolhido e não representa um preço oficial da B3. O modelo continua em memória, sem roteamento externo, calendário de ajustes ou recuperação durável.
+Parar o contexto mantém o vínculo suspenso. Reiniciar é permitido após o retorno da chamada anterior, com a mesma fonte, símbolo e escala, preservando o último horário aceito. Chamadas simultâneas são recusadas. Marcação manual e variação de liquidação manual são recusadas enquanto existir o vínculo, evitando referências concorrentes. Fechar o motor cancela requisições em andamento; o chamador deve aguardar o retorno do feed. A requisição preserva cancelamento e timeout como erros reconhecíveis por `errors.Is` com `context.Canceled` e `context.DeadlineExceeded`; o polling continua suspendendo o instrumento e tentando recuperar após falhas. O preço é específico do provedor escolhido e não representa um preço oficial da B3. O modelo continua em memória, sem roteamento externo, calendário de ajustes ou recuperação durável.
+
+### Erros de configuração de risco
+
+`SetRiskLimits` retorna `ErrInvalidRiskLimits` se o ID do cliente for vazio ou o ponteiro de limites for nulo. Limites numéricos iguais a zero mantêm seu significado anterior. `AddCircuitBreaker` retorna `ErrInvalidCircuitBreaker` para ponteiro nulo, símbolo vazio ou com espaços nas extremidades, percentual zero, estado desconhecido ou cooldown negativo. Configurações inválidas preservam a configuração anterior; os chamadores devem verificar o erro retornado. A comparação percentual do circuit breaker usa produtos inteiros de 128 bits, sem overflow ou arredondamento que dispare abaixo do limiar.
 
 As premissas gerais de margem e variação são descritas pela [CME sobre marcação a mercado](https://www.cmegroup.com/education/courses/introduction-to-futures/mark-to-market) e pela [CME sobre margens inicial e de manutenção](https://www.cmegroup.com/solutions/risk-management/performance-bonds-margins/faq-performance-bonds-margins.html). Os parâmetros e a política implementados aqui são do simulador, sem promessa de conformidade integral com uma bolsa.
 

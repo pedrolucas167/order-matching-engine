@@ -20,9 +20,9 @@ func main() {
 
 	go func() {
 		for trade := range engine.GetTradeChannel() {
-			log.Printf("TRADE: %s | Price: $%.2f | Qty: %d | Bid: %s | Ask: %s\n",
+			log.Printf("TRADE: %s | Price: $%s | Qty: %d | Bid: %s | Ask: %s\n",
 				trade.Symbol,
-				float64(trade.Price)/1_000_000,
+				formatDemoMoney(trade.Price),
 				trade.Quantity,
 				trade.BidOrder,
 				trade.AskOrder,
@@ -46,7 +46,7 @@ func main() {
 			log.Printf("Failed to submit ask order: %v", err)
 			return
 		} else {
-			fmt.Printf("  Submitted Ask: $%.2f | Qty: %d\n", float64(order.Price)/1_000_000, order.Quantity)
+			fmt.Printf("  Submitted Ask: $%s | Qty: %d\n", formatDemoMoney(order.Price), order.Quantity)
 		}
 	}
 
@@ -54,12 +54,12 @@ func main() {
 	if snapshot != nil {
 		fmt.Printf("\nOrder Book Snapshot:\n")
 		if snapshot.BestBid != nil {
-			fmt.Printf("  Best Bid: $%.2f (Qty: %d)\n", float64(snapshot.BestBid.Price)/1_000_000, snapshot.BestBid.TotalQty)
+			fmt.Printf("  Best Bid: $%s (Qty: %d)\n", formatDemoMoney(snapshot.BestBid.Price), snapshot.BestBid.TotalQty)
 		} else {
 			fmt.Printf("  Best Bid: None\n")
 		}
 		if snapshot.BestAsk != nil {
-			fmt.Printf("  Best Ask: $%.2f (Qty: %d)\n", float64(snapshot.BestAsk.Price)/1_000_000, snapshot.BestAsk.TotalQty)
+			fmt.Printf("  Best Ask: $%s (Qty: %d)\n", formatDemoMoney(snapshot.BestAsk.Price), snapshot.BestAsk.TotalQty)
 		} else {
 			fmt.Printf("  Best Ask: None\n")
 		}
@@ -81,7 +81,7 @@ func main() {
 		log.Printf("Failed to submit bid order: %v", err)
 		return
 	} else {
-		fmt.Printf("  Submitted Bid: $%.2f | Qty: %d\n", float64(bidOrder.Price)/1_000_000, bidOrder.Quantity)
+		fmt.Printf("  Submitted Bid: $%s | Qty: %d\n", formatDemoMoney(bidOrder.Price), bidOrder.Quantity)
 	}
 
 	time.Sleep(100 * time.Millisecond)
@@ -90,12 +90,12 @@ func main() {
 	if snapshot != nil {
 		fmt.Printf("\nOrder Book Snapshot After Matching:\n")
 		if snapshot.BestBid != nil {
-			fmt.Printf("  Best Bid: $%.2f (Qty: %d)\n", float64(snapshot.BestBid.Price)/1_000_000, snapshot.BestBid.TotalQty)
+			fmt.Printf("  Best Bid: $%s (Qty: %d)\n", formatDemoMoney(snapshot.BestBid.Price), snapshot.BestBid.TotalQty)
 		} else {
 			fmt.Printf("  Best Bid: None\n")
 		}
 		if snapshot.BestAsk != nil {
-			fmt.Printf("  Best Ask: $%.2f (Qty: %d)\n", float64(snapshot.BestAsk.Price)/1_000_000, snapshot.BestAsk.TotalQty)
+			fmt.Printf("  Best Ask: $%s (Qty: %d)\n", formatDemoMoney(snapshot.BestAsk.Price), snapshot.BestAsk.TotalQty)
 		} else {
 			fmt.Printf("  Best Ask: None\n")
 		}
@@ -200,9 +200,9 @@ func main() {
 
 	go func() {
 		for trade := range engine2.GetTradeChannel() {
-			log.Printf("TRADE: %s | Price: $%.2f | Qty: %d\n",
+			log.Printf("TRADE: %s | Price: $%s | Qty: %d\n",
 				trade.Symbol,
-				float64(trade.Price)/1_000_000,
+				formatDemoMoney(trade.Price),
 				trade.Quantity,
 			)
 		}
@@ -290,7 +290,7 @@ func main() {
 
 	snapshot2 := engine2.GetSnapshot(symbol2)
 	if snapshot2 != nil && snapshot2.BestBid != nil {
-		fmt.Printf("  Current Best Bid: $%.2f\n", float64(snapshot2.BestBid.Price)/1_000_000)
+		fmt.Printf("  Current Best Bid: $%s\n", formatDemoMoney(snapshot2.BestBid.Price))
 	}
 
 	fmt.Println("\nScenario 7: Risk Management Demo...")
@@ -300,9 +300,9 @@ func main() {
 
 	go func() {
 		for trade := range engine3.GetTradeChannel() {
-			log.Printf("TRADE: %s | Price: $%.2f | Qty: %d\n",
+			log.Printf("TRADE: %s | Price: $%s | Qty: %d\n",
 				trade.Symbol,
-				float64(trade.Price)/1_000_000,
+				formatDemoMoney(trade.Price),
 				trade.Quantity,
 			)
 		}
@@ -346,7 +346,10 @@ func main() {
 		MaxExposure:     50,
 		MaxPositionSize: 5000,
 	}
-	riskManager.SetRiskLimits(client2ID, limits)
+	if err := riskManager.SetRiskLimits(client2ID, limits); err != nil {
+		log.Printf("Failed to configure risk limits: %v", err)
+		return
+	}
 
 	breaker := &CircuitBreaker{
 		Symbol:         symbol3,
@@ -355,7 +358,10 @@ func main() {
 		LastPrice:      30000000,
 		CooldownPeriod: 30 * 1000000000,
 	}
-	riskManager.AddCircuitBreaker(breaker)
+	if err := riskManager.AddCircuitBreaker(breaker); err != nil {
+		log.Printf("Failed to configure circuit breaker: %v", err)
+		return
+	}
 
 	fmt.Printf("  Created %s with $10,000 collateral\n", client1.Name)
 	fmt.Printf("  Created %s with $10,000 collateral and strict limits\n", client2.Name)
@@ -419,17 +425,17 @@ func main() {
 
 	fmt.Println("\n  Test 4: Check client positions...")
 	if c1, ok := riskManager.GetClient(client1ID); ok {
-		fmt.Printf("    %s: Long Position: %d, Exposure: $%.2f\n",
+		fmt.Printf("    %s: Long Position: %d, Exposure: $%s\n",
 			c1.Name,
 			c1.LongPosition,
-			float64(c1.Exposure)/1_000_000,
+			formatDemoMoney(c1.Exposure),
 		)
 	}
 	if c2, ok := riskManager.GetClient(client2ID); ok {
-		fmt.Printf("    %s: Long Position: %d, Exposure: $%.2f\n",
+		fmt.Printf("    %s: Long Position: %d, Exposure: $%s\n",
 			c2.Name,
 			c2.LongPosition,
-			float64(c2.Exposure)/1_000_000,
+			formatDemoMoney(c2.Exposure),
 		)
 	}
 
@@ -512,10 +518,10 @@ func main() {
 	if snapshot != nil {
 		fmt.Printf("\nFinal Order Book Snapshot:\n")
 		if snapshot.BestBid != nil {
-			fmt.Printf("  Best Bid: $%.2f (Qty: %d)\n", float64(snapshot.BestBid.Price)/1_000_000, snapshot.BestBid.TotalQty)
+			fmt.Printf("  Best Bid: $%s (Qty: %d)\n", formatDemoMoney(snapshot.BestBid.Price), snapshot.BestBid.TotalQty)
 		}
 		if snapshot.BestAsk != nil {
-			fmt.Printf("  Best Ask: $%.2f (Qty: %d)\n", float64(snapshot.BestAsk.Price)/1_000_000, snapshot.BestAsk.TotalQty)
+			fmt.Printf("  Best Ask: $%s (Qty: %d)\n", formatDemoMoney(snapshot.BestAsk.Price), snapshot.BestAsk.TotalQty)
 		}
 	}
 
