@@ -26,6 +26,8 @@ type MatchingEngine struct {
 	ordersProcessed   atomic.Uint64
 	priceFeeds        map[string]*priceFeedState
 	markTimes         map[string]time.Time
+	liquidationPolicy LiquidationPolicy
+	liquidations      map[liquidationKey]LiquidationStatus
 }
 
 func NewMatchingEngine(orderBufferSize, tradeBufferSize int) *MatchingEngine {
@@ -38,15 +40,16 @@ func NewDerivativesMatchingEngine(orderBufferSize, tradeBufferSize int) *Matchin
 
 func newMatchingEngine(orderBufferSize, tradeBufferSize int, derivativesEnabled bool) *MatchingEngine {
 	me := &MatchingEngine{
-		books:       make(map[string]*OrderBook),
-		stopOrders:  make(map[string][]*Order),
-		riskManager: newRiskManager(derivativesEnabled),
-		tradeChan:   make(chan *Trade, tradeBufferSize),
-		commandChan: make(chan func(), orderBufferSize),
-		stop:        make(chan struct{}),
-		done:        make(chan struct{}),
-		priceFeeds:  make(map[string]*priceFeedState),
-		markTimes:   make(map[string]time.Time),
+		books:        make(map[string]*OrderBook),
+		stopOrders:   make(map[string][]*Order),
+		riskManager:  newRiskManager(derivativesEnabled),
+		tradeChan:    make(chan *Trade, tradeBufferSize),
+		commandChan:  make(chan func(), orderBufferSize),
+		stop:         make(chan struct{}),
+		done:         make(chan struct{}),
+		priceFeeds:   make(map[string]*priceFeedState),
+		markTimes:    make(map[string]time.Time),
+		liquidations: make(map[liquidationKey]LiquidationStatus),
 	}
 	me.tradeBacklogLimit = int64(tradeBufferSize)
 	if me.tradeBacklogLimit < 1 {
@@ -172,9 +175,11 @@ func (me *MatchingEngine) matchingLoop() {
 		case command := <-me.commandChan:
 			me.expirePriceFeeds()
 			command()
+			me.attemptLiquidations()
 		case <-ticker.C:
 			me.expirePriceFeeds()
 			me.checkAndTriggerStopOrders()
+			me.attemptLiquidations()
 		case output <- next:
 			me.pendingTrades[0] = nil
 			me.pendingTrades = me.pendingTrades[1:]
