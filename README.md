@@ -18,6 +18,10 @@ Um motor de matching de ordens de alta performance em Go, projetado para latênc
 
 ## Arquitetura
 
+O módulo é `github.com/pedrolucas167/order-matching-engine`. O núcleo fica em `internal/matching`; os adaptadores HTTP ficam em `internal/httpapi`, e a demonstração em `internal/demo`, executada pelo comando `cmd/order-demo`.
+
+`matching` mantém a posse do estado mutável e reúne matching, risco, feeds e recuperação transacional. `httpapi` depende apenas de seu contrato público. A demo também usa esse contrato; o núcleo não depende dos adaptadores nem do executável. Os testes ficam junto das responsabilidades que validam.
+
 ### Solicitações idempotentes e entrada HTTP
 
 `SubmitOrderRequest(ctx, key, order)` processa uma ordem no mesmo dono mutável do matching e retorna um recibo e um indicador de replay. A chave tem de 1 a 128 caracteres ASCII visíveis, sem espaços. Ela é global ao motor: os dados da ordem, incluindo cliente, ID, campos ignorados pelo tipo e timestamp, ficam vinculados à primeira solicitação processada. Na entrada HTTP, timestamp e estado inicial são definidos pelo contrato, sem campos livres para o cliente.
@@ -33,7 +37,7 @@ Nos construtores em memória, os registros ficam durante a execução do motor, 
 
 Para preservar recibos, books e estado financeiro após reinício, usar o perfil explícito `NewDurableDerivativesMatchingEngine`. Ele grava um snapshot transacional antes de confirmar a solicitação e mantém uma outbox de negócios com confirmação do consumidor. Os construtores em memória conservam seu contrato anterior. O [contrato de recuperação durável](DURABLE_RECOVERY.md) detalha abertura, falhas, retomada e limites.
 
-`NewOrderHTTPHandler(engine)` fornece um `http.Handler` para um motor de derivativos previamente configurado com clientes e instrumentos. Este incremento fornece o componente e testes HTTP locais; não inicia um listener nem altera a execução da demo. Autenticação, autorização, configuração de um servidor persistente e exposição externa continuam pendentes. `client_id` identifica uma conta já cadastrada e não autentica o chamador.
+`httpapi.NewOrderHTTPHandler(engine)` fornece um `http.Handler` para um motor de derivativos previamente configurado com clientes e instrumentos. Este incremento fornece o componente e testes HTTP locais; não inicia um listener nem altera a execução da demo. Autenticação, autorização, configuração de um servidor persistente e exposição externa continuam pendentes. `client_id` identifica uma conta já cadastrada e não autentica o chamador.
 
 O endpoint é `POST /orders`, com `Content-Type: application/json` e um único cabeçalho `Idempotency-Key`. O corpo tem no máximo 4 KiB. O parser rejeita campos desconhecidos, duplicados, nomes com outra capitalização, JSON adicional e valores monetários/quantidades fora do formato inteiro. Preços e quantidades são **strings decimais de inteiros na escala configurada**, evitando perda de precisão em clientes com números de ponto flutuante.
 
@@ -98,7 +102,7 @@ Essa entrada aceita novas ordens, não a restauração de ordens já parcialment
 - Quantidades e posições potenciais devem caber na faixa simétrica de `int64`; multiplicações e somas de margem são verificadas antes da reserva. Garantias e margens usam unidades inteiras da `MarginCurrency`. Um restante que não caiba no total do nível do book é rejeitado e sua reserva é liberada.
 - `GetDerivativePosition` e `GetMarginAccount` retornam valores independentes. Use esses métodos para o perfil financeiro; os campos globais legados `Client.Exposure`, `LongPosition` e `ShortPosition` não representam posições de derivativos.
 
-Exemplo de configuração dentro do pacote (com `fmt` e `github.com/google/uuid` importados):
+Exemplo de configuração dentro de `internal/matching` (com `fmt` e `github.com/google/uuid` importados):
 
 ```go
 func derivativesExample() error {
@@ -225,17 +229,17 @@ Referências oficiais: [Effective Go: concorrência](https://go.dev/doc/effectiv
 go mod tidy
 
 # Rodar o exemplo
-go run .
+go run ./cmd/order-demo
 
 # Rodar benchmarks
-go test -bench=. -benchmem
+go test -run '^$' -bench=. -benchmem ./internal/matching
 ```
 
 ## Uso
 
 ### Exemplo Básico
 
-Exemplo para o `main.go` do pacote do projeto:
+Exemplo para um comando dentro deste módulo:
 
 ```go
 package main
@@ -244,17 +248,18 @@ import (
     "fmt"
 
     "github.com/google/uuid"
+    "github.com/pedrolucas167/order-matching-engine/internal/matching"
 )
 
 func main() {
-    engine := NewMatchingEngine(10000, 10000)
+    engine := matching.NewMatchingEngine(10000, 10000)
     defer engine.Close()
 
-    order := &Order{
+    order := &matching.Order{
         ID:        uuid.New(),
         Symbol:    "BTC-USD",
-        Side:      Bid,
-        Type:      Limit,
+        Side:      matching.Bid,
+        Type:      matching.Limit,
         Price:     50000000,
         Quantity:  100,
         Remaining: 100,
@@ -281,14 +286,14 @@ A demo interrompe o cenário quando uma submissão necessária falha. No cenári
 snapshot := engine.GetSnapshot("BTC-USD")
 if snapshot != nil {
     if snapshot.BestBid != nil {
-        fmt.Printf("Best Bid: $%.2f\n", float64(snapshot.BestBid.Price)/1_000_000)
+        fmt.Printf("Best Bid: $%d.%06d\n", snapshot.BestBid.Price/1_000_000, snapshot.BestBid.Price%1_000_000)
     }
 }
 ```
 
-## Cenários de Teste (main.go)
+## Cenários da demo
 
-A aplicação demo inclui 5 cenários:
+A demo inclui os cenários básicos abaixo, além dos exemplos de stops e controles de risco:
 
 1. **Submissão de Ordens Iniciais**: Submete 5 ordens de venda (asks)
 2. **Matching de Ordens**: Submete ordem de compra que matchea com asks existentes
@@ -300,7 +305,7 @@ A aplicação demo inclui 5 cenários:
 
 Execute benchmarks para medir performance:
 ```bash
-go test -bench=. -benchmem
+go test -run '^$' -bench=. -benchmem ./internal/matching
 ```
 
 Nos benchmarks de carga, `ErrBackpressure` é uma recusa esperada; qualquer outro erro de submissão faz o benchmark falhar. A preparação dos books exige que todas as ordens sejam aceitas na fila. Os tempos medem tentativas de submissão, não garantem execução de todas as ordens.
@@ -325,13 +330,16 @@ Os testes cobrem matching, stops e cancelamentos concorrentes, execução única
 
 ```
 Order Matching Engine/
-├── go.mod              # Dependências do projeto
-├── main.go             # Aplicação demo com 5 cenários
-├── types.go            # Estruturas de dados core
-├── orderbook.go        # Implementação do order book
-├── matcher.go          # Motor de matching
-├── benchmark_test.go   # Benchmarks de performance
-└── README.md           # Documentação
+├── cmd/
+│   └── order-demo/main.go
+├── internal/
+│   ├── matching/       # Motor, risco, idempotência, feed e recuperação
+│   ├── httpapi/        # Contrato HTTP e testes de integração/carga
+│   └── demo/           # Cenários e formatação monetária
+├── go.mod
+├── README.md
+├── DURABLE_RECOVERY.md
+└── ROADMAP.md
 ```
 
 ## Evolução do Projeto

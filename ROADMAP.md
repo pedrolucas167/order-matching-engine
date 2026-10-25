@@ -8,6 +8,8 @@ As regras oficiais da [Coinbase](https://www.coinbase.com/legal/trading_rules) d
 
 ## Entregas concluídas
 
+- Pacotes de projeto separados: núcleo em `internal/matching`, adaptador em `internal/httpapi` e demo em `internal/demo`, com executável em `cmd/order-demo`. As fronteiras preservam o dono único do estado e o formato persistente.
+
 - Matching com um único dono mutável, cópias independentes de entradas e consultas, cancelamentos serializados e execução de stops no mesmo loop.
 - Regressões para preço/FIFO, fills parciais, IDs ativos duplicados, quantidades, estados finais e referência de preço sem overflow.
 - Validação estrutural antes da fila, erros de submissão tratados nos chamadores e distinção entre entrada na fila e aprovação pelo risco.
