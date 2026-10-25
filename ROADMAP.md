@@ -13,19 +13,23 @@ As regras oficiais da [Coinbase](https://www.coinbase.com/legal/trading_rules) d
 - Validação estrutural antes da fila, erros de submissão tratados nos chamadores e distinção entre entrada na fila e aprovação pelo risco.
 - Testes com detector de corridas, repetições concorrentes e execução curta de todos os benchmarks. Esses resultados não substituem validação financeira nem demonstram capacidade ou latência de produção.
 
-A [correção de concorrência](https://github.com/pedrolucas167/order-matching-engine/pull/1) e a [validação de entrada](https://github.com/pedrolucas167/order-matching-engine/pull/2) estão em pull requests abertas, ainda sem merge. A segunda depende da primeira.
+A [correção de concorrência](https://github.com/pedrolucas167/order-matching-engine/pull/1) e a [validação de entrada](https://github.com/pedrolucas167/order-matching-engine/pull/2) foram entregues em pull requests encadeadas. O estado atualizado de revisão e merge deve ser consultado nesses links.
 
-## Decisão de domínio antes do primeiro incremento
+## Domínio escolhido
 
-**Pendente de definição com o usuário:** mercado à vista, derivativos com margem ou apenas matching sem contabilidade financeira.
+**Confirmado pelo usuário:** derivativos com margem e posições compradas ou vendidas por instrumento.
 
-A proposta inicial é simular mercado à vista, sem alavancagem: uma compra compromete saldo na moeda de cotação; uma venda compromete estoque do ativo. Derivativos exigem outro tratamento de posições vendidas, garantias e margem. Essa escolha deve preceder mudanças no modelo financeiro.
+O primeiro incremento usa um perfil explícito de derivativos, com margem inicial fixa por contrato, denominada na mesma moeda da garantia da conta. Compradores e vendedores podem abrir posições sem pagar ou receber o valor nocional integral. O modelo é uma simplificação para simulação, não um cálculo de margem de bolsa.
+
+Referências: [margem inicial e de manutenção na CME](https://www.cmegroup.com/solutions/risk-management/performance-bonds-margins/faq-performance-bonds-margins.html) e [finalidade das margens em futuros — CFTC](https://www.cftc.gov/LearnAndProtect/AdvisoriesAndArticles/economicpurpose.html).
+
+A etapa 1 fica dividida em **1a: posições, margem inicial e reservas** e **1b: resultado financeiro, ajuste por preço, margem de manutenção e resposta à insuficiência de margem**. O primeiro incremento implementa somente 1a. Não há ainda SPAN, compensação entre produtos, cálculo de P&L, ajuste diário ou liquidação automática.
 
 ## Etapas e critérios de conclusão
 
 | Etapa | Resultado esperado | Critério de conclusão |
 | --- | --- | --- |
-| 1. Modelo financeiro e reservas | Contas por cliente/ativo, unidades explícitas, aritmética verificada, reservas e limites coerentes com o mercado escolhido | Ordens simultâneas não reutilizam saldo ou estoque; fills transferem os ativos corretos; cancelamentos e rejeições liberam somente a reserva restante; posições respeitam o instrumento e os limites definidos |
+| 1. Modelo financeiro e reservas | Contas por cliente/ativo, unidades explícitas, aritmética verificada, reservas e limites coerentes com o mercado escolhido | Ordens simultâneas não reutilizam garantia; fills atualizam posições líquidas por instrumento; cancelamentos e rejeições liberam somente a reserva restante, preservando a margem de posições ainda abertas |
 | 2. Registro durável e recuperação | Eventos sequenciados, contrato de aceitação durável, replay e tratamento de retransmissões | Reiniciar a partir do registro reconstrói os mesmos books, posições e saldos; retransmitir uma solicitação não duplica execução; perda de publicação e interrupção têm comportamento verificável |
 | 3. Regras do mercado escolhido | Tamanho de lote e tick, instruções de validade, prevenção de autonegociação e regras explícitas para stops e interrupções | Cenários de conformidade passam para as regras selecionadas; prioridade, cancelamentos e disparos não dependem de convenções implícitas |
 | 4. Interface de execução e observabilidade | Resultados por ordem, identificadores de eventos, consultas, dados de mercado sequenciados e autenticação quando houver acesso externo | Um consumidor distingue validação, aceitação, rejeição pelo risco, fill parcial, fill total e cancelamento; reconexão detecta lacunas de eventos |
@@ -33,19 +37,25 @@ A proposta inicial é simular mercado à vista, sem alavancagem: uma compra comp
 
 Cada incremento deve ter branch própria, commits pequenos em Conventional Commits, sem coautoria, testes pertinentes e uma descrição curta de PR. Não fazer merge automático. As etapas posteriores não autorizam, por si, implantação, integração a uma bolsa, inclusão de CI ou uso de dinheiro real.
 
-## Primeiro incremento financeiro proposto
+## Incremento 1a implementado nesta branch
 
-Após definir o domínio, limitar a primeira implementação à aceitação e ao ciclo de vida de reservas:
+No domínio escolhido, limitar o primeiro incremento ao ciclo de vida da margem inicial e das reservas:
 
-1. Definir ativos/unidades e o estado financeiro por cliente, sem somar quantidades de instrumentos diferentes em uma única posição.
+1. Registrar instrumentos, moeda de garantia e margem por contrato; manter posições líquidas com sinal por cliente e instrumento.
 2. Verificar operações aritméticas e limites antes de comprometer recursos.
 3. Reservar recursos quando a ordem for aprovada pelo risco, no caminho serializado do matching.
-4. Atualizar a reserva proporcionalmente a cada fill; devolver excesso quando houver melhora de preço, cancelamento ou rejeição do restante.
-5. Cobrir reservas concorrentes, fills parciais, cancelamentos, rejeições, isolamento de consultas e conservação de saldos.
+4. Converter margem de ordens em margem de posição a cada fill; liberar somente a reserva remanescente em cancelamentos e rejeições, e liberar margem de posição quando a posição for encerrada.
+5. Cobrir reservas concorrentes, fills parciais, cancelamentos, rejeições, isolamento de consultas, contraposição dos contratos e invariantes de garantia disponível e comprometida.
 
-Compras market e stops precisam de uma política explícita de orçamento ou proteção de preço. O preço opcional fornecido em uma ordem market não deve ser tratado como custo garantido de execução. Taxas e alavancagem não devem ser presumidas como implementadas.
+Neste incremento, a margem de ordens limit, market e stop depende da quantidade de contratos, não do preço informado. Stops já comprometem margem enquanto estão pendentes. Para cada instrumento, o orçamento cobre a maior posição líquida alcançável se as compras ou vendas em aberto executarem. Não há compensação de margem entre instrumentos diferentes. Proteção de preço, taxas e atualização dinâmica da margem ficam fora deste incremento.
 
-## Lacunas concretas encontradas no código atual
+O perfil financeiro é criado explicitamente por `NewDerivativesMatchingEngine`. `NewMatchingEngine` permanece como simulação educativa legada; os perfis não são misturados no mesmo motor. O primeiro perfil exige instrumentos e clientes cadastrados, posições com sinal e moeda de garantia compatível.
+
+A implementação reserva margem no mesmo fluxo serializado das ordens, liquida a quantidade das duas contrapartes antes de publicar o trade e libera reservas do restante em cancelamentos, rejeições e encerramento do motor. Fechar o motor não encerra posições: a margem de contratos já executados permanece comprometida. Esse comportamento continua sem flush ou recuperação durável.
+
+A próxima etapa financeira é **1b**, antes de considerar o modelo uma gestão completa de risco: definir multiplicador do contrato, preço de marcação, resultado realizado/não realizado, variação da garantia, margem de manutenção e política explícita para insuficiência. Taxas, proteção de preço e dados externos também precisam de contratos próprios.
+
+## Lacunas identificadas no modelo anterior
 
 - `checkCollateral` compara uma ordem isolada com a garantia, mas não reserva recursos para ordens abertas. Duas ordens podem passar individualmente e comprometer mais do que o saldo total.
 - `Exposure` usa um inteiro sem sinal e é reduzido em vendas. Uma exposição que deveria ficar negativa pode sofrer underflow; a correção depende de definir venda de estoque versus abertura de posição vendida.
@@ -55,3 +65,5 @@ Compras market e stops precisam de uma política explícita de orçamento ou pro
 - Estado e publicação são mantidos em memória. `Close` continua imediato, sem flush, e pode descartar comandos e trades pendentes conforme o contrato atual.
 
 A etapa 1 deve corrigir o modelo financeiro selecionado, sem reescrever simultaneamente matching, persistência e interfaces. Recuperação durável, mudanças na referência de stops e novos protocolos ficam para os incrementos correspondentes.
+
+No perfil novo, a reserva, as posições por instrumento e o limite de posição potencial endereçam as quatro primeiras lacunas acima. O modelo legado continua educativo e não deve ser utilizado como contabilidade financeira de derivativos. Referência dos stops e recuperação durável permanecem nas etapas futuras; não foram alteradas silenciosamente neste incremento.
