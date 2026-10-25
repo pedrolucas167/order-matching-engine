@@ -225,7 +225,9 @@ func (me *MatchingEngine) matchLimitOrder(book *OrderBook, order *Order) {
 		if order.Remaining < order.Quantity {
 			order.Status = PartialFilled
 		}
-		book.addOrder(order)
+		if !book.addOrder(order) {
+			order.Status = Rejected
+		}
 	} else {
 		order.Status = Filled
 	}

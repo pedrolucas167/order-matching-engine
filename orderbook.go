@@ -2,6 +2,7 @@ package main
 
 import (
 	"container/heap"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -58,9 +59,18 @@ func NewOrderBook(symbol string) *OrderBook {
 }
 
 // AddOrder adds an order to the appropriate side of the book
-func (ob *OrderBook) addOrder(order *Order) {
+func (ob *OrderBook) addOrder(order *Order) bool {
 	if _, exists := ob.orders[order.ID]; exists {
-		return
+		return false
+	}
+	levels := ob.asks
+	if order.Side == Bid {
+		levels = ob.bids.PriceHeap
+	}
+	for _, level := range levels {
+		if level.Price == order.Price && level.TotalQty > math.MaxUint64-order.Remaining {
+			return false
+		}
 	}
 	ob.orders[order.ID] = order
 
@@ -70,6 +80,7 @@ func (ob *OrderBook) addOrder(order *Order) {
 		ob.addAsk(order)
 	}
 	ob.updateSnapshot()
+	return true
 }
 
 // addBid adds a buy order to the bid side
