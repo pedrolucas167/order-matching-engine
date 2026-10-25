@@ -24,6 +24,25 @@ Um motor de matching de ordens de alta performance em Go, projetado para latênc
 - **PriceLevel**: Agrupa ordens no mesmo preço com ordenação FIFO
 - **Trade**: Representa um trade matcheado com detalhes de execução
 
+### Validação de novas ordens
+
+`SubmitOrder` valida uma cópia da entrada antes de consultar o estado de encerramento ou backpressure e antes de enfileirar o comando. Uma entrada inválida retorna imediatamente um erro identificável por `errors.Is(err, ErrInvalidOrder)`, com a indicação do campo inválido. Ela não altera a entrada do chamador, books, stops, contadores ou estado de risco.
+
+| Campo | Regra para uma nova submissão |
+| --- | --- |
+| Ordem e `ID` | Ordem não nula e UUID diferente de `uuid.Nil` |
+| `Symbol` | Não vazio e sem espaços em branco nas extremidades; não há normalização automática |
+| `Side` | `Bid` ou `Ask` |
+| `Type` | `Limit`, `Market`, `StopMarket` ou `StopLimit` |
+| `Quantity` e `Remaining` | Quantidade positiva e `Remaining == Quantity` |
+| `Status` | `Pending` (valor padrão) ou `Open` |
+| `Price` | Positivo para `Limit` e `StopLimit`; opcional nos tipos market, cujo preço de execução vem do book |
+| `StopPrice` | Positivo para `StopMarket` e `StopLimit`; ignorado nos demais tipos |
+
+`ClientID` continua opcional e não precisa estar cadastrado para esta validação estrutural. `Timestamp` também é opcional; a prioridade FIFO depende da ordem de processamento. Não foram adicionados limites arbitrários de tamanho, preço ou formato do símbolo além das regras acima. Limites financeiros continuam sob responsabilidade do RiskManager. O preço informado nos tipos market é preservado e pode participar das verificações de risco existentes, embora não determine o preço da execução; essas políticas não foram alteradas.
+
+Essa entrada aceita novas ordens, não a restauração de ordens já parcialmente executadas. Fills parciais, ativações de stops e cópias de books continuam sendo processados internamente sem reaplicar a regra de nova submissão. Entrada válida ainda pode receber `ErrEngineClosed` ou `ErrBackpressure`; após aceitação na fila, duplicidade de ID ativo e risco continuam sendo verificados pelo loop.
+
 ### Modelo de Concorrência
 
 `SubmitOrder` copia a entrada antes de enfileirar o comando. O retorno confirma aceitação na fila, não execução; o objeto original não recebe alterações de status. Um ID já ativo no mesmo símbolo (no book ou em stops pendentes) é rejeitado no processamento; `OrderBook.AddOrder` ignora IDs já presentes. Isso protege o índice de cancelamento, sem oferecer deduplicação histórica de ordens concluídas. Cancelamentos e consultas aguardam o comando correspondente e observam os comandos anteriores na mesma fila. Chamadas simultâneas são ordenadas pelo recebimento no canal. O ticker de stops pertence ao próprio loop e executa os stops diretamente, sem enviar comandos ao próprio canal.
@@ -53,7 +72,7 @@ Referências oficiais: [Effective Go: concorrência](https://go.dev/doc/effectiv
 go mod tidy
 
 # Rodar o exemplo
-go run main.go
+go run .
 
 # Rodar benchmarks
 go test -bench=. -benchmem
@@ -62,39 +81,46 @@ go test -bench=. -benchmem
 ## Uso
 
 ### Exemplo Básico
+
+Exemplo para o `main.go` do pacote do projeto:
+
 ```go
 package main
 
 import (
-    "awesomeProject"
+    "fmt"
+
     "github.com/google/uuid"
-    "time"
 )
 
 func main() {
-    // Cria engine com buffer de 10K ordens e 10K trades
-    engine := awesomeProject.NewMatchingEngine(10000, 10000)
+    engine := NewMatchingEngine(10000, 10000)
     defer engine.Close()
 
-    // Submete uma ordem limit
-    order := &awesomeProject.Order{
+    order := &Order{
         ID:        uuid.New(),
         Symbol:    "BTC-USD",
-        Side:      awesomeProject.Bid,
-        Type:      awesomeProject.Limit,
-        Price:     50000000,  // $50.00 em micros
+        Side:      Bid,
+        Type:      Limit,
+        Price:     50000000,
         Quantity:  100,
         Remaining: 100,
-        Timestamp: time.Now().UnixNano(),
     }
-    engine.SubmitOrder(order)
+    if err := engine.SubmitOrder(order); err != nil {
+        fmt.Printf("Order could not be queued: %v\n", err)
+        return
+    }
+    fmt.Println("Order queued; risk checks and execution run in the matching loop")
 
-    // Consome trades
-    for trade := range engine.GetTradeChannel() {
-        fmt.Printf("Trade: %s @ $%.2f\n", trade.Symbol, float64(trade.Price)/1_000_000)
+    snapshot := engine.GetSnapshot(order.Symbol)
+    if snapshot != nil && snapshot.BestBid != nil {
+        fmt.Printf("Best bid: %d, remaining quantity: %d\n",
+            snapshot.BestBid.Price, snapshot.BestBid.TotalQty)
     }
 }
 ```
+
+A demo interrompe o cenário quando uma submissão necessária falha. No cenário de carga, somente `ErrBackpressure` conta como rejeição por capacidade; erros de validação ou encerramento são reportados separadamente. As mensagens de risco distinguem entrada na fila de aprovação financeira, e as estatísticas são lidas após os comandos correspondentes.
 
 ### Leitura de Snapshot
 ```go
@@ -123,6 +149,8 @@ Execute benchmarks para medir performance:
 ```bash
 go test -bench=. -benchmem
 ```
+
+Nos benchmarks de carga, `ErrBackpressure` é uma recusa esperada; qualquer outro erro de submissão faz o benchmark falhar. A preparação dos books exige que todas as ordens sejam aceitas na fila. Os tempos medem tentativas de submissão, não garantem execução de todas as ordens.
 
 ### Benchmarks Disponíveis
 - `BenchmarkMatchingEngine_SubmitOrder`: Throughput de submissão de ordens

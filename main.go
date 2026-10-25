@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -43,6 +44,7 @@ func main() {
 		}
 		if err := engine.SubmitOrder(order); err != nil {
 			log.Printf("Failed to submit ask order: %v", err)
+			return
 		} else {
 			fmt.Printf("  Submitted Ask: $%.2f | Qty: %d\n", float64(order.Price)/1_000_000, order.Quantity)
 		}
@@ -77,6 +79,7 @@ func main() {
 	}
 	if err := engine.SubmitOrder(bidOrder); err != nil {
 		log.Printf("Failed to submit bid order: %v", err)
+		return
 	} else {
 		fmt.Printf("  Submitted Bid: $%.2f | Qty: %d\n", float64(bidOrder.Price)/1_000_000, bidOrder.Quantity)
 	}
@@ -100,7 +103,7 @@ func main() {
 
 	stats := engine.GetStats()
 	fmt.Printf("\nEngine Statistics:\n")
-	fmt.Printf("  Orders Processed: %d\n", stats.OrdersProcessed)
+	fmt.Printf("  Orders Queued: %d\n", stats.OrdersProcessed)
 	fmt.Printf("  Trades Processed: %d\n", stats.TradesProcessed)
 	fmt.Printf("  Active Order Books: %d\n", stats.ActiveBooks)
 
@@ -117,6 +120,7 @@ func main() {
 	}
 	if err := engine.SubmitOrder(marketOrder); err != nil {
 		log.Printf("Failed to submit market order: %v", err)
+		return
 	} else {
 		fmt.Printf("  Submitted Market Sell: Qty: %d\n", marketOrder.Quantity)
 	}
@@ -134,7 +138,10 @@ func main() {
 		Remaining: 100,
 		Timestamp: time.Now().UnixNano(),
 	}
-	engine.SubmitOrder(cancelOrder)
+	if err := engine.SubmitOrder(cancelOrder); err != nil {
+		log.Printf("Failed to submit cancellation candidate: %v", err)
+		return
+	}
 	fmt.Printf("  Submitted order to cancel: %s\n", cancelOrder.ID)
 
 	cancelled := engine.CancelOrder(cancelOrder.ID, symbol)
@@ -145,8 +152,8 @@ func main() {
 	}
 
 	fmt.Println("\nScenario 5: Testing backpressure with rapid order submission...")
-	successCount := 0
-	failCount := 0
+	queuedCount := 0
+	backpressureRejections := 0
 	for i := 0; i < 15000; i++ {
 		side := Bid
 		if i%2 == 0 {
@@ -162,20 +169,25 @@ func main() {
 			Remaining: 10,
 			Timestamp: time.Now().UnixNano(),
 		}
-		if err := engine.SubmitOrder(order); err != nil {
-			failCount++
-		} else {
-			successCount++
+		err := engine.SubmitOrder(order)
+		switch {
+		case err == nil:
+			queuedCount++
+		case errors.Is(err, ErrBackpressure):
+			backpressureRejections++
+		default:
+			log.Printf("Unexpected submission failure during backpressure demo: %v", err)
+			return
 		}
 	}
-	fmt.Printf("  Successful submissions: %d\n", successCount)
-	fmt.Printf("  Backpressure rejections: %d\n", failCount)
+	fmt.Printf("  Orders queued: %d\n", queuedCount)
+	fmt.Printf("  Backpressure rejections: %d\n", backpressureRejections)
 
 	time.Sleep(200 * time.Millisecond)
 
 	stats = engine.GetStats()
 	fmt.Printf("\nFinal Engine Statistics:\n")
-	fmt.Printf("  Orders Processed: %d\n", stats.OrdersProcessed)
+	fmt.Printf("  Orders Queued: %d\n", stats.OrdersProcessed)
 	fmt.Printf("  Trades Processed: %d\n", stats.TradesProcessed)
 	fmt.Printf("  Active Order Books: %d\n", stats.ActiveBooks)
 
@@ -217,8 +229,14 @@ func main() {
 			Remaining: 100,
 			Timestamp: time.Now().UnixNano(),
 		}
-		engine2.SubmitOrder(bid)
-		engine2.SubmitOrder(ask)
+		if err := engine2.SubmitOrder(bid); err != nil {
+			log.Printf("Failed to submit stop demo bid: %v", err)
+			return
+		}
+		if err := engine2.SubmitOrder(ask); err != nil {
+			log.Printf("Failed to submit stop demo ask: %v", err)
+			return
+		}
 	}
 
 	time.Sleep(50 * time.Millisecond)
@@ -235,7 +253,10 @@ func main() {
 		Remaining: 50,
 		Timestamp: time.Now().UnixNano(),
 	}
-	engine2.SubmitOrder(stopLossOrder)
+	if err := engine2.SubmitOrder(stopLossOrder); err != nil {
+		log.Printf("Failed to submit stop-loss order: %v", err)
+		return
+	}
 	fmt.Printf("  Stop-Loss Order ID: %s\n", stopLossOrder.ID)
 
 	time.Sleep(50 * time.Millisecond)
@@ -255,7 +276,10 @@ func main() {
 			Remaining: 100,
 			Timestamp: time.Now().UnixNano(),
 		}
-		engine2.SubmitOrder(ask)
+		if err := engine2.SubmitOrder(ask); err != nil {
+			log.Printf("Failed to submit stop demo ask: %v", err)
+			return
+		}
 	}
 
 	time.Sleep(150 * time.Millisecond)
@@ -343,12 +367,11 @@ func main() {
 		Remaining: 5000,
 		Timestamp: time.Now().UnixNano(),
 	}
-	err1 := engine3.SubmitOrder(order1)
-	if err1 != nil {
-		fmt.Printf("    Order rejected: %v\n", err1)
-	} else {
-		fmt.Printf("    Order accepted (no limits)\n")
+	if err := engine3.SubmitOrder(order1); err != nil {
+		log.Printf("Failed to queue risk demo order: %v", err)
+		return
 	}
+	fmt.Println("    Order queued for asynchronous risk checks")
 
 	fmt.Println("\n  Test 2: Client B tries order exceeding size limit...")
 	order2 := &Order{
@@ -362,12 +385,11 @@ func main() {
 		Remaining: 2000,
 		Timestamp: time.Now().UnixNano(),
 	}
-	err2 := engine3.SubmitOrder(order2)
-	if err2 != nil {
-		fmt.Printf("    Order rejected: %v\n", err2)
-	} else {
-		fmt.Printf("    Order accepted\n")
+	if err := engine3.SubmitOrder(order2); err != nil {
+		log.Printf("Failed to queue risk demo order: %v", err)
+		return
 	}
+	fmt.Println("    Order queued for asynchronous risk checks")
 
 	fmt.Println("\n  Test 3: Client B places order within limits...")
 	order3 := &Order{
@@ -381,12 +403,11 @@ func main() {
 		Remaining: 500,
 		Timestamp: time.Now().UnixNano(),
 	}
-	err3 := engine3.SubmitOrder(order3)
-	if err3 != nil {
-		fmt.Printf("    Order rejected: %v\n", err3)
-	} else {
-		fmt.Printf("    Order accepted\n")
+	if err := engine3.SubmitOrder(order3); err != nil {
+		log.Printf("Failed to queue risk demo order: %v", err)
+		return
 	}
+	fmt.Println("    Order queued for asynchronous risk checks")
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -430,8 +451,14 @@ func main() {
 			Remaining: 100,
 			Timestamp: time.Now().UnixNano(),
 		}
-		engine3.SubmitOrder(ask)
-		engine3.SubmitOrder(bid)
+		if err := engine3.SubmitOrder(ask); err != nil {
+			log.Printf("Failed to submit circuit breaker demo ask: %v", err)
+			return
+		}
+		if err := engine3.SubmitOrder(bid); err != nil {
+			log.Printf("Failed to submit circuit breaker demo bid: %v", err)
+			return
+		}
 	}
 
 	time.Sleep(100 * time.Millisecond)
@@ -460,15 +487,16 @@ func main() {
 		Remaining: 100,
 		Timestamp: time.Now().UnixNano(),
 	}
-	err4 := engine3.SubmitOrder(order4)
-	if err4 != nil {
-		fmt.Printf("    Order rejected: %v\n", err4)
-	} else {
-		fmt.Printf("    Order accepted\n")
+	if err := engine3.SubmitOrder(order4); err != nil {
+		log.Printf("Failed to queue risk demo order: %v", err)
+		return
 	}
+	fmt.Println("    Order queued for asynchronous risk checks")
 
+	queuedOrders := engine3.GetStats().OrdersProcessed
 	riskStats := riskManager.GetStats()
 	fmt.Printf("\n  Risk Management Statistics:\n")
+	fmt.Printf("    Orders Queued: %d\n", queuedOrders)
 	fmt.Printf("    Orders Rejected: %d\n", riskStats.OrdersRejected)
 	fmt.Printf("    Orders Blocked by Circuit Breaker: %d\n", riskStats.OrdersBlockedByCB)
 	fmt.Printf("    Exposure Breaches: %d\n", riskStats.ExposureBreaches)

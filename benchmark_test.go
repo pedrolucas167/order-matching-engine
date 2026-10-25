@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -27,7 +28,10 @@ func BenchmarkMatchingEngine_SubmitOrder(b *testing.B) {
 				Remaining: 100,
 				Timestamp: time.Now().UnixNano(),
 			}
-			engine.SubmitOrder(order)
+			if err := engine.SubmitOrder(order); err != nil && !errors.Is(err, ErrBackpressure) {
+				b.Error(err)
+				return
+			}
 		}
 	})
 }
@@ -93,7 +97,9 @@ func BenchmarkMatchingEngine_ConcurrentMatching(b *testing.B) {
 			Remaining: 100,
 			Timestamp: time.Now().UnixNano(),
 		}
-		engine.SubmitOrder(order)
+		if err := engine.SubmitOrder(order); err != nil {
+			b.Fatal(err)
+		}
 	}
 
 	b.ResetTimer()
@@ -109,7 +115,10 @@ func BenchmarkMatchingEngine_ConcurrentMatching(b *testing.B) {
 				Remaining: 100,
 				Timestamp: time.Now().UnixNano(),
 			}
-			engine.SubmitOrder(order)
+			if err := engine.SubmitOrder(order); err != nil && !errors.Is(err, ErrBackpressure) {
+				b.Error(err)
+				return
+			}
 		}
 	})
 }
@@ -132,7 +141,9 @@ func BenchmarkMatchingEngine_LockFreeSnapshot(b *testing.B) {
 			Remaining: 100,
 			Timestamp: time.Now().UnixNano(),
 		}
-		engine.SubmitOrder(order)
+		if err := engine.SubmitOrder(order); err != nil {
+			b.Fatal(err)
+		}
 	}
 
 	b.ResetTimer()
@@ -172,7 +183,10 @@ func BenchmarkMatchingEngine_HighThroughput(b *testing.B) {
 					Remaining: 100,
 					Timestamp: time.Now().UnixNano(),
 				}
-				engine.SubmitOrder(order)
+				if err := engine.SubmitOrder(order); err != nil && !errors.Is(err, ErrBackpressure) {
+					b.Error(err)
+					return
+				}
 			}
 		}(w)
 	}
