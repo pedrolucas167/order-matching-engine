@@ -181,6 +181,10 @@ Order Matching Engine/
 └── README.md           # Documentação
 ```
 
+## Evolução do Projeto
+
+O [roadmap](ROADMAP.md) registra a relevância de mercado, lacunas atuais, decisões de domínio e critérios de conclusão para os próximos incrementos.
+
 ## Considerações de Produção
 
 ### Escalabilidade
