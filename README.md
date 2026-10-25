@@ -29,9 +29,9 @@ Um motor de matching de ordens de alta performance em Go, projetado para latênc
 
 O recibo registra o resultado **da submissão original**, com sequência, estado inicial, quantidades executada e restante e motivo de rejeição. Não é uma consulta ao estado atual da ordem. Uma market pode executar parcialmente e rejeitar o restante; as quantidades do recibo preservam essa distinção. A sequência representa solicitações processadas, não um log durável de eventos de mercado.
 
-Os registros ficam em memória durante a execução do motor, sem TTL ou remoção silenciosa. A capacidade padrão é de 100.000 registros; `SetOrderRequestCapacity` permite ajustá-la, sem reduzir abaixo do histórico retido. Ao atingir a capacidade, novas chaves são recusadas e recibos existentes continuam disponíveis quando a fila admite a consulta. As APIs antigas de submissão permanecem assíncronas e não criam recibos; um ID já registrado no caminho idempotente também não pode ser reexecutado por elas.
+Nos construtores em memória, os registros ficam durante a execução do motor, sem TTL ou remoção silenciosa. A capacidade padrão é de 100.000 registros; `SetOrderRequestCapacity` permite ajustá-la, sem reduzir abaixo do histórico retido. Ao atingir a capacidade, novas chaves são recusadas e recibos existentes continuam disponíveis quando a fila admite a consulta. As APIs antigas de submissão permanecem assíncronas e não criam recibos; um ID já registrado no caminho idempotente também não pode ser reexecutado por elas.
 
-**Persistência ainda pendente:** reiniciar perde tanto o histórico de idempotência quanto o estado financeiro e os books. A garantia desta etapa vale dentro da mesma execução e não substitui registro durável, replay ou publicação transacional. Esse é o próximo incremento necessário antes de atravessar reinícios com segurança.
+Para preservar recibos, books e estado financeiro após reinício, usar o perfil explícito `NewDurableDerivativesMatchingEngine`. Ele grava um snapshot transacional antes de confirmar a solicitação e mantém uma outbox de negócios com confirmação do consumidor. Os construtores em memória conservam seu contrato anterior. O [contrato de recuperação durável](DURABLE_RECOVERY.md) detalha abertura, falhas, retomada e limites.
 
 `NewOrderHTTPHandler(engine)` fornece um `http.Handler` para um motor de derivativos previamente configurado com clientes e instrumentos. Este incremento fornece o componente e testes HTTP locais; não inicia um listener nem altera a execução da demo. Autenticação, autorização, configuração de um servidor persistente e exposição externa continuam pendentes. `client_id` identifica uma conta já cadastrada e não autentica o chamador.
 
@@ -135,7 +135,7 @@ O exemplo usa uma unidade monetária fictícia. Antes de executar, a ordem de ve
 
 O perfil também calcula P&L por FIFO, marcação e variação de liquidação conforme descrito abaixo. Liquidação automática e feed externo são recursos opcionais, configurados explicitamente. Ainda não implementa taxas, modelos de carteira como SPAN, opções ou uma clearing. Atualizar limites de tamanho ou volume afeta novas admissões; o gatilho de liquidação é o déficit de margem de manutenção.
 
-No perfil de derivativos, `Close` continua imediato e sem flush: libera reservas das ordens pendentes e conserva a margem das posições já executadas. Não encerra posições nem garante a entrega dos trades ainda não publicados. Persistência e recuperação permanecem fora deste incremento.
+No perfil de derivativos em memória, `Close` continua imediato e sem flush: libera reservas das ordens pendentes e conserva a margem das posições já executadas. Não encerra posições nem garante a entrega dos trades ainda não publicados. No perfil durável, ordens e reservas já gravadas permanecem no banco para recuperação, junto dos negócios ainda não confirmados.
 
 ### P&L, marcação e margem de manutenção
 
@@ -343,7 +343,7 @@ O [roadmap](ROADMAP.md) registra a relevância de mercado, lacunas atuais, decis
 ### Escalabilidade
 - **Horizontal**: Deploy múltiplas instâncias do engine, shard por símbolo
 - **Vertical**: Aumenta tamanhos de buffer para maior throughput
-- **Persistência**: Adiciona persistência de ordens para crash recovery
+- **Persistência**: Perfil transacional de recuperação implementado; evolução para auditoria histórica, migrações e medições com disco segue no roadmap
 
 ### Monitoramento
 - Track profundidade do order channel (indicador de backpressure)

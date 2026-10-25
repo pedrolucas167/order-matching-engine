@@ -11,27 +11,28 @@ import (
 )
 
 type MatchingEngine struct {
-	books             map[string]*OrderBook
-	stopOrders        map[string][]*Order
-	riskManager       *RiskManager
-	tradeChan         chan *Trade
-	commandChan       chan func()
-	stop              chan struct{}
-	done              chan struct{}
-	closeOnce         sync.Once
-	pendingTrades     []*Trade
-	pendingTradeCount atomic.Int64
-	tradeBacklogLimit int64
-	tradesProcessed   atomic.Uint64
-	ordersProcessed   atomic.Uint64
-	priceFeeds        map[string]*priceFeedState
-	markTimes         map[string]time.Time
-	liquidationPolicy LiquidationPolicy
-	liquidations      map[liquidationKey]LiquidationStatus
-	requests          map[string]processedOrderRequest
-	requestOrders     map[uuid.UUID]string
-	requestLimit      int
-	requestSequence   uint64
+	books              map[string]*OrderBook
+	stopOrders         map[string][]*Order
+	riskManager        *RiskManager
+	tradeChan          chan *Trade
+	commandChan        chan func()
+	stop               chan struct{}
+	done               chan struct{}
+	closeOnce          sync.Once
+	pendingTrades      []*Trade
+	pendingTradeCount  atomic.Int64
+	tradeBacklogLimit  int64
+	tradesProcessed    atomic.Uint64
+	ordersProcessed    atomic.Uint64
+	priceFeeds         map[string]*priceFeedState
+	markTimes          map[string]time.Time
+	liquidationPolicy  LiquidationPolicy
+	liquidations       map[liquidationKey]LiquidationStatus
+	requests           map[string]processedOrderRequest
+	requestOrders      map[uuid.UUID]string
+	requestLimit       int
+	requestSequence    uint64
+	managedPersistence bool
 }
 
 func NewMatchingEngine(orderBufferSize, tradeBufferSize int) *MatchingEngine {
@@ -43,20 +44,25 @@ func NewDerivativesMatchingEngine(orderBufferSize, tradeBufferSize int) *Matchin
 }
 
 func newMatchingEngine(orderBufferSize, tradeBufferSize int, derivativesEnabled bool) *MatchingEngine {
+	return newEngineMode(orderBufferSize, tradeBufferSize, derivativesEnabled, false)
+}
+
+func newEngineMode(orderBufferSize, tradeBufferSize int, derivativesEnabled, managed bool) *MatchingEngine {
 	me := &MatchingEngine{
-		books:         make(map[string]*OrderBook),
-		stopOrders:    make(map[string][]*Order),
-		riskManager:   newRiskManager(derivativesEnabled),
-		tradeChan:     make(chan *Trade, tradeBufferSize),
-		commandChan:   make(chan func(), orderBufferSize),
-		stop:          make(chan struct{}),
-		done:          make(chan struct{}),
-		priceFeeds:    make(map[string]*priceFeedState),
-		markTimes:     make(map[string]time.Time),
-		liquidations:  make(map[liquidationKey]LiquidationStatus),
-		requests:      make(map[string]processedOrderRequest),
-		requestOrders: make(map[uuid.UUID]string),
-		requestLimit:  100000,
+		books:              make(map[string]*OrderBook),
+		stopOrders:         make(map[string][]*Order),
+		riskManager:        newRiskManagerMode(derivativesEnabled, !managed),
+		tradeChan:          make(chan *Trade, tradeBufferSize),
+		commandChan:        make(chan func(), orderBufferSize),
+		stop:               make(chan struct{}),
+		done:               make(chan struct{}),
+		priceFeeds:         make(map[string]*priceFeedState),
+		markTimes:          make(map[string]time.Time),
+		liquidations:       make(map[liquidationKey]LiquidationStatus),
+		requests:           make(map[string]processedOrderRequest),
+		requestOrders:      make(map[uuid.UUID]string),
+		requestLimit:       100000,
+		managedPersistence: managed,
 	}
 	me.tradeBacklogLimit = int64(tradeBufferSize)
 	if me.tradeBacklogLimit < 1 {
@@ -172,7 +178,7 @@ func (me *MatchingEngine) matchingLoop() {
 		}
 		var output chan *Trade
 		var next *Trade
-		if len(me.pendingTrades) > 0 {
+		if len(me.pendingTrades) > 0 && !me.managedPersistence {
 			output = me.tradeChan
 			next = me.pendingTrades[0]
 		}
@@ -180,10 +186,17 @@ func (me *MatchingEngine) matchingLoop() {
 		case <-me.stop:
 			return
 		case command := <-me.commandChan:
-			me.expirePriceFeeds()
+			if !me.managedPersistence {
+				me.expirePriceFeeds()
+			}
 			command()
-			me.attemptLiquidations()
+			if !me.managedPersistence {
+				me.attemptLiquidations()
+			}
 		case <-ticker.C:
+			if me.managedPersistence {
+				continue
+			}
 			me.expirePriceFeeds()
 			me.checkAndTriggerStopOrders()
 			me.attemptLiquidations()
