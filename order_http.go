@@ -12,7 +12,11 @@ import (
 	"github.com/google/uuid"
 )
 
-type OrderHTTPHandler struct{ engine *MatchingEngine }
+type orderRequestSubmitter interface {
+	SubmitOrderRequest(context.Context, string, *Order) (OrderReceipt, bool, error)
+}
+
+type OrderHTTPHandler struct{ engine orderRequestSubmitter }
 
 type HTTPOrderRequest struct {
 	OrderID   uuid.UUID `json:"order_id"`
@@ -28,6 +32,13 @@ type HTTPOrderRequest struct {
 func NewOrderHTTPHandler(engine *MatchingEngine) (http.Handler, error) {
 	if engine == nil || !engine.riskManager.derivativesEnabled {
 		return nil, errors.New("order HTTP handler requires a derivatives engine")
+	}
+	return &OrderHTTPHandler{engine: engine}, nil
+}
+
+func NewDurableOrderHTTPHandler(engine *DurableMatchingEngine) (http.Handler, error) {
+	if engine == nil {
+		return nil, errors.New("durable order HTTP handler requires an engine")
 	}
 	return &OrderHTTPHandler{engine: engine}, nil
 }

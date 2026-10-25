@@ -50,6 +50,10 @@ type RiskStats struct {
 func NewRiskManager() *RiskManager { return newRiskManager(false) }
 
 func newRiskManager(derivativesEnabled bool) *RiskManager {
+	return newRiskManagerMode(derivativesEnabled, true)
+}
+
+func newRiskManagerMode(derivativesEnabled, background bool) *RiskManager {
 	rm := &RiskManager{
 		derivativesEnabled:     derivativesEnabled,
 		derivativeInstruments:  make(map[string]DerivativeInstrument),
@@ -66,7 +70,11 @@ func newRiskManager(derivativesEnabled bool) *RiskManager {
 	}
 
 	// Start circuit breaker cooldown monitor
-	go rm.cooldownMonitor()
+	if background {
+		go rm.cooldownMonitor()
+	} else {
+		close(rm.done)
+	}
 
 	return rm
 }
