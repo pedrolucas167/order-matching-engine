@@ -92,7 +92,7 @@ func derivativesExample() error {
 
 O exemplo usa uma unidade monetária fictícia. Antes de executar, a ordem de venda deixa dois contratos pendentes e compromete 200 unidades de margem, embora seu nocional seja maior que a garantia. Ao executar, a posição líquida passa a negativa. O retorno de `SubmitOrder` continua indicando aceitação na fila; aprovação financeira é posterior.
 
-O perfil também calcula P&L por FIFO, marcação e variação de liquidação conforme descrito abaixo. Ainda não implementa liquidação automática, taxas, modelos de carteira como SPAN, opções ou uma clearing. Atualizar limites de tamanho ou volume afeta novas admissões, sem liquidar posições automaticamente.
+O perfil também calcula P&L por FIFO, marcação e variação de liquidação conforme descrito abaixo. Liquidação automática e feed externo são recursos opcionais, configurados explicitamente. Ainda não implementa taxas, modelos de carteira como SPAN, opções ou uma clearing. Atualizar limites de tamanho ou volume afeta novas admissões; o gatilho de liquidação é o déficit de margem de manutenção.
 
 No perfil de derivativos, `Close` continua imediato e sem flush: libera reservas das ordens pendentes e conserva a margem das posições já executadas. Não encerra posições nem garante a entrega dos trades ainda não publicados. Persistência e recuperação permanecem fora deste incremento.
 
@@ -101,7 +101,7 @@ No perfil de derivativos, `Close` continua imediato e sem flush: libera reservas
 - `ContractMultiplier` define o valor monetário de cada unidade inteira de `Price`, por contrato; seu padrão é 1. Preços e margem precisam usar escalas compatíveis definidas pelo simulador. Não há ponto flutuante nem arredondamento de preço médio: o custo de entrada é mantido em lotes FIFO.
 - `MaintenanceMarginPerContract` deve ser positiva e não exceder a margem inicial. Se omitida, assume a margem inicial, preservando a configuração anterior sem inventar um percentual de bolsa.
 - `GetDerivativePosition` informa resultado realizado e não realizado; `GetDerivativeLots` devolve uma cópia dos lotes de entrada. Fechamentos parciais consomem os lotes mais antigos, e uma reversão abre o restante no preço do novo negócio.
-- A primeira execução fornece a marcação inicial do instrumento. Depois disso, ela **não acompanha automaticamente os trades**. `SetDerivativeMarkPrice(symbol, price)` atualiza a referência explicitamente, pelo loop do motor, e `GetDerivativeMarkPrice` permite consultá-la. Não há feed externo implementado.
+- A primeira execução fornece a marcação inicial do instrumento. Depois disso, ela **não acompanha automaticamente os trades**. `SetDerivativeMarkPrice(symbol, price)` atualiza a referência explicitamente, pelo loop do motor, e `GetDerivativeMarkPrice` permite consultá-la. O feed externo opcional descrito abaixo assume a autoridade sobre a referência do instrumento vinculado.
 - `SettleDerivativeInstrument(symbol, settlementPrice)` simula a variação de liquidação: move o resultado não realizado para o realizado e redefine a base dos contratos ainda abertos nesse preço. Repetir o mesmo preço não credita ou debita o resultado duas vezes. A chamada é manual; não existe calendário ou execução diária automática.
 - `MarginAccount.Equity = Collateral + RealizedPnL + UnrealizedPnL`. `Collateral` representa o aporte-base administrado pelo simulador, e não é reescrito como lucro ou prejuízo. Não há protocolo bancário de depósitos, saques ou transferência para uma clearing.
 - Patrimônio e resultados monetários usam a faixa simétrica de `int64`. No perfil financeiro, aportes e margem comprometida devem caber em `MaxInt64`; o perfil educativo legado e os preços continuam com seus tipos anteriores. Intermediários de soma usam precisão inteira ampliada antes de validar o resultado final, evitando dependência da ordem de iteração dos instrumentos. Marcação ou liquidação que exceda a faixa é rejeitada integralmente, sem alterar contas, lotes ou referência.
@@ -109,9 +109,45 @@ No perfil de derivativos, `Close` continua imediato e sem flush: libera reservas
 
 **Política conservadora de insuficiência:** após processar uma ordem, um lote de stops ou uma marcação/liquidação, o motor cancela todas as ordens e stops pendentes das contas cujo patrimônio não cobre a margem inicial exigida. A partir daí, somente uma ordem `Market` que reduza uma posição existente, sem ultrapassar sua quantidade e sem outras ordens pendentes nesse instrumento, pode ser aceita apesar do déficit. Esse fechamento não é bloqueado pelo limite diário de volume ou posição; limites operacionais de tamanho da ordem e circuit breaker continuam aplicáveis. Cancelamento e fechamento não apagam perdas.
 
-Ordens previamente admitidas são processadas como uma unidade pelo matching. Preços de execução distintos da marcação podem produzir déficit durante esse processamento; negócios já executados não são desfeitos. A política não promete impedir perdas por gaps e não substitui bandas de preço, liquidação ou modelos de risco de produção.
+Ordens previamente admitidas são processadas como uma unidade pelo matching. Preços de execução distintos da marcação podem produzir déficit durante esse processamento; negócios já executados não são desfeitos. A política não promete impedir perdas por gaps. A proteção de preço da liquidação abaixo não altera as ordens market comuns.
 
-`AddClient` pode atualizar o aporte-base: reforços são aceitos mesmo quando apenas reduzem o déficit; reduções são recusadas se o patrimônio resultante não cobrir a margem inicial. A moeda de uma conta cadastrada é imutável neste modelo. Nenhuma posição é liquidada automaticamente. O próximo incremento precisa definir essa política e sua relação com preços, liquidez, limites e recuperação durável.
+`AddClient` pode atualizar o aporte-base: reforços são aceitos mesmo quando apenas reduzem o déficit; reduções são recusadas se o patrimônio resultante não cobrir a margem inicial. A moeda de uma conta cadastrada é imutável neste modelo. Sem configurar `SetLiquidationPolicy`, posições não são liquidadas automaticamente.
+
+### Liquidação automática opcional
+
+`SetLiquidationPolicy(LiquidationPolicy{MaxSlippageBps: 100, MaxMarkAge: 5*time.Second, RetryInterval: time.Second})` habilita tentativas de fechamento quando a conta apresenta déficit de **margem de manutenção**. Os valores do exemplo são parâmetros de simulação, não regras de bolsa. Uma política vazia desabilita o recurso. A avaliação ocorre após comandos e no ticker do motor; cada conta/instrumento respeita o intervalo entre tentativas.
+
+Antes de tentar fechar posições, o motor cancela as pendências das contas com déficit de margem inicial. As contas são percorridas por ID e os instrumentos por símbolo, com nova verificação do déficit antes de cada instrumento. A tentativa usa a posição atual inteira, sem inverter seu sinal. Se ela exceder o limite operacional de tamanho, a tentativa fica bloqueada, sem fracionamento automático.
+
+O fechamento é imediato, com resto cancelado, usando somente ofertas reais do book e o mesmo caminho de contabilização dos negócios normais. Para fechar uma compra, o preço mínimo é `ceil(mark*(10000-bps)/10000)`, pelo menos uma unidade; para fechar uma venda, o máximo é `floor(mark*(10000+bps)/10000)`. `bps` fica entre zero e 10000. Não há fill sintético no preço de referência. Falta de ofertas, preço fora da banda, autonegociação, falha de contabilização, circuit breaker ou limite operacional podem impedir o fechamento. A tentativa também aguarda quando a publicação de trades está congestionada.
+
+Execuções parciais liberam somente a reserva do resto e mantêm a posição residual. Novas tentativas reavaliam posição, patrimônio, preço e liquidez. O volume e o limite de posição não impedem redução de risco; tamanho máximo e circuit breaker continuam aplicáveis. `GetLiquidationStatus(clientID, symbol)` devolve uma cópia do resultado da **última tentativa**, com quantidade tentada, executada, restante, limite, horário e motivo; não é um histórico acumulado. Um depósito posterior não apaga esse registro.
+
+Todos os instrumentos com posição aberta na conta precisam de referências explícitas dentro de `MaxMarkAge`. A marcação inicial derivada de um negócio não basta para autorizar liquidação. Feed parado, inválido ou atrasado bloqueia novas tentativas. Contas afetadas por uma execução podem ser avaliadas no próximo ciclo; não existe cascata recursiva. Saldo negativo persiste após fechar a posição: não há perdão de dívida, fundo de seguro ou garantia de execução.
+
+### Alimentação externa de preços
+
+`RunMarkPriceFeed(ctx, config)` executa polling HTTP do endpoint público de mark price de futuros USD-M da Binance e bloqueia até cancelar o contexto ou fechar o motor. Deve ser chamado em uma goroutine cujo resultado o chamador acompanha. Não usa credenciais nem envia ordens a uma bolsa. O contrato de resposta segue a [documentação oficial de market data](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data#mark-price).
+
+```go
+config := MarkPriceFeedConfig{
+    Symbol: "BTC-SIM", SourceSymbol: "BTCUSDT",
+    PriceScale: 100_000_000,
+    PollInterval: time.Second, MaxAge: 5 * time.Second,
+    MaxFutureSkew: 100 * time.Millisecond, RequestTimeout: 2 * time.Second,
+}
+// Após cadastrar BTC-SIM, usar a mesma unidade inteira nos preços e na contabilidade.
+// O chamador fornece ctx, inicia a goroutine e acompanha seu erro de retorno.
+err := engine.RunMarkPriceFeed(ctx, config)
+```
+
+`BaseURL` vazio usa `https://fapi.binance.com`. Outros endereços precisam de HTTPS; HTTP é aceito somente em loopback para testes locais. Não há redirects. Polling fora de loopback exige intervalo de pelo menos um segundo; o chamador deve considerar limites agregados do provedor. Erros HTTP, incluindo restrição regional e rate limit, suspendem o instrumento; não há fallback automático. Respostas são limitadas a 16 KiB e cada requisição tem timeout.
+
+`PriceScale` converte o decimal para a unidade inteira do motor, sem ponto flutuante nem arredondamento. Símbolo divergente, decimal inválido, precisão não representável, preço zero, overflow, horário ausente, futuro além da tolerância, dado antigo ou fora de sequência são rejeitados. Uma resposta idêntica com o mesmo horário é idempotente e não renova a idade da fonte; um preço diferente no mesmo horário é inválido.
+
+Vincular um feed cancela ordens e stops do instrumento até chegar a primeira referência válida. Falha ou atraso posterior cancela as pendências e suspende **todas** as novas ordens, inclusive fechamentos manuais, até a recuperação. Contas com posição aberta nesse instrumento também têm pendências canceladas e admissões suspensas nos demais instrumentos, pois seu patrimônio depende da referência indisponível. A última marcação é preservada para consulta, mas deve ser interpretada junto de `GetMarkPriceFeedStatus`: `Connected` indica a última consulta válida e `Fresh` indica validade temporal. A expiração é verificada antes de comandos e no ticker. Nenhum negócio já executado é revertido.
+
+Parar o contexto mantém o vínculo suspenso. Reiniciar é permitido após o retorno da chamada anterior, com a mesma fonte, símbolo e escala, preservando o último horário aceito. Chamadas simultâneas são recusadas. Marcação manual e variação de liquidação manual são recusadas enquanto existir o vínculo, evitando referências concorrentes. Fechar o motor cancela requisições em andamento; o chamador deve aguardar o retorno do feed. O preço é específico do provedor escolhido e não representa um preço oficial da B3. O modelo continua em memória, sem roteamento externo, calendário de ajustes ou recuperação durável.
 
 As premissas gerais de margem e variação são descritas pela [CME sobre marcação a mercado](https://www.cmegroup.com/education/courses/introduction-to-futures/mark-to-market) e pela [CME sobre margens inicial e de manutenção](https://www.cmegroup.com/solutions/risk-management/performance-bonds-margins/faq-performance-bonds-margins.html). Os parâmetros e a política implementados aqui são do simulador, sem promessa de conformidade integral com uma bolsa.
 
