@@ -74,19 +74,20 @@ type PriceLevel struct {
 }
 
 type Client struct {
-	ID           uuid.UUID
-	Name         string
-	Collateral   uint64
-	Exposure     uint64
-	LongPosition uint64
-	ShortPosition uint64
+	ID             uuid.UUID
+	Name           string
+	Collateral     uint64
+	MarginCurrency string
+	Exposure       uint64
+	LongPosition   uint64
+	ShortPosition  uint64
 }
 
 type RiskLimits struct {
-	MaxOrderSize      uint64
-	MaxDailyVolume    uint64
-	MaxExposure       uint64
-	MaxPositionSize   uint64
+	MaxOrderSize    uint64
+	MaxDailyVolume  uint64
+	MaxExposure     uint64
+	MaxPositionSize uint64
 }
 
 type CircuitBreakerState int
@@ -98,13 +99,13 @@ const (
 )
 
 type CircuitBreaker struct {
-	Symbol          string
-	State           CircuitBreakerState
-	TriggerPrice    uint64
-	ThresholdPct    uint64
-	LastPrice       uint64
-	OpenTime        int64
-	CooldownPeriod  int64
+	Symbol         string
+	State          CircuitBreakerState
+	TriggerPrice   uint64
+	ThresholdPct   uint64
+	LastPrice      uint64
+	OpenTime       int64
+	CooldownPeriod int64
 }
 
 type RiskCheckResult struct {

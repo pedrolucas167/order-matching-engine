@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -9,19 +10,23 @@ import (
 )
 
 type RiskManager struct {
-	stop            chan struct{}
-	done            chan struct{}
-	closeOnce       sync.Once
-	clients         map[uuid.UUID]*Client
-	clientMu        sync.RWMutex
-	riskLimits      map[uuid.UUID]*RiskLimits
-	limitsMu        sync.RWMutex
-	circuitBreakers map[string]*CircuitBreaker
-	breakerMu       sync.RWMutex
-	dailyVolume     map[uuid.UUID]map[string]uint64
-	volumeMu        sync.RWMutex
-	statistics      RiskStats
-	statsMu         sync.RWMutex
+	derivativesEnabled     bool
+	derivativeInstruments  map[string]DerivativeInstrument
+	derivativePositions    map[uuid.UUID]map[string]DerivativePosition
+	derivativeReservations map[derivativeOrderKey]derivativeReservation
+	stop                   chan struct{}
+	done                   chan struct{}
+	closeOnce              sync.Once
+	clients                map[uuid.UUID]*Client
+	accountMu              sync.RWMutex
+	riskLimits             map[uuid.UUID]*RiskLimits
+	limitsMu               sync.RWMutex
+	circuitBreakers        map[string]*CircuitBreaker
+	breakerMu              sync.RWMutex
+	dailyVolume            map[uuid.UUID]map[string]uint64
+	volumeMu               sync.RWMutex
+	statistics             RiskStats
+	statsMu                sync.RWMutex
 }
 
 // RiskStats represents risk management statistics
@@ -33,14 +38,20 @@ type RiskStats struct {
 }
 
 // NewRiskManager creates a new risk manager
-func NewRiskManager() *RiskManager {
+func NewRiskManager() *RiskManager { return newRiskManager(false) }
+
+func newRiskManager(derivativesEnabled bool) *RiskManager {
 	rm := &RiskManager{
-		stop:            make(chan struct{}),
-		done:            make(chan struct{}),
-		clients:         make(map[uuid.UUID]*Client),
-		riskLimits:      make(map[uuid.UUID]*RiskLimits),
-		circuitBreakers: make(map[string]*CircuitBreaker),
-		dailyVolume:     make(map[uuid.UUID]map[string]uint64),
+		derivativesEnabled:     derivativesEnabled,
+		derivativeInstruments:  make(map[string]DerivativeInstrument),
+		derivativePositions:    make(map[uuid.UUID]map[string]DerivativePosition),
+		derivativeReservations: make(map[derivativeOrderKey]derivativeReservation),
+		stop:                   make(chan struct{}),
+		done:                   make(chan struct{}),
+		clients:                make(map[uuid.UUID]*Client),
+		riskLimits:             make(map[uuid.UUID]*RiskLimits),
+		circuitBreakers:        make(map[string]*CircuitBreaker),
+		dailyVolume:            make(map[uuid.UUID]map[string]uint64),
 	}
 
 	// Start circuit breaker cooldown monitor
@@ -50,14 +61,35 @@ func NewRiskManager() *RiskManager {
 }
 
 // AddClient adds a new client to the risk manager
-func (rm *RiskManager) AddClient(client *Client) {
-	rm.clientMu.Lock()
-	defer rm.clientMu.Unlock()
+func (rm *RiskManager) AddClient(client *Client) error {
+	if client == nil || client.ID == uuid.Nil {
+		return ErrClientNotFound
+	}
 	copied := *client
-	rm.clients[client.ID] = &copied
+	if rm.derivativesEnabled && (copied.MarginCurrency == "" || strings.TrimSpace(copied.MarginCurrency) != copied.MarginCurrency) {
+		return ErrMarginCurrencyMismatch
+	}
+	rm.accountMu.Lock()
+	defer rm.accountMu.Unlock()
+	if rm.derivativesEnabled {
+		account, err := rm.calculateMarginAccountLocked(copied.ID, "", nil)
+		if err != nil && !errors.Is(err, ErrClientNotFound) {
+			return err
+		}
+		if account.PositionMargin+account.OrderMargin > copied.Collateral {
+			return ErrInsufficientMargin
+		}
+		if previous := rm.clients[copied.ID]; previous != nil && account.PositionMargin+account.OrderMargin > 0 && previous.MarginCurrency != copied.MarginCurrency {
+			return ErrMarginCurrencyMismatch
+		}
+	}
+	rm.clients[copied.ID] = &copied
 	rm.volumeMu.Lock()
 	defer rm.volumeMu.Unlock()
-	rm.dailyVolume[client.ID] = make(map[string]uint64)
+	if _, exists := rm.dailyVolume[copied.ID]; !exists {
+		rm.dailyVolume[copied.ID] = make(map[string]uint64)
+	}
+	return nil
 }
 
 // SetRiskLimits sets risk limits for a client
@@ -78,6 +110,23 @@ func (rm *RiskManager) AddCircuitBreaker(breaker *CircuitBreaker) {
 
 // CheckOrder performs all risk checks before allowing an order
 func (rm *RiskManager) CheckOrder(order *Order) RiskCheckResult {
+	return rm.checkOrder(order, false)
+}
+
+func (rm *RiskManager) checkAndReserveOrder(order *Order) RiskCheckResult {
+	return rm.checkOrder(order, true)
+}
+
+func (rm *RiskManager) checkOrder(order *Order, reserve bool) RiskCheckResult {
+	if order == nil {
+		return RiskCheckResult{Reason: ErrInvalidOrder.Error()}
+	}
+	if rm.derivativesEnabled {
+		if err := validateNewOrder(*order); err != nil {
+			return RiskCheckResult{Reason: err.Error()}
+		}
+	}
+
 	// Check circuit breaker first
 	if cbResult := rm.checkCircuitBreaker(order); !cbResult.Approved {
 		return cbResult
@@ -91,6 +140,19 @@ func (rm *RiskManager) CheckOrder(order *Order) RiskCheckResult {
 	// Check daily volume limits
 	if volumeResult := rm.checkDailyVolume(order); !volumeResult.Approved {
 		return volumeResult
+	}
+
+	if rm.derivativesEnabled {
+		rm.accountMu.Lock()
+		err := rm.checkDerivativeOrderLocked(order, reserve)
+		rm.accountMu.Unlock()
+		if err != nil {
+			rm.statsMu.Lock()
+			rm.statistics.OrdersRejected++
+			rm.statsMu.Unlock()
+			return RiskCheckResult{Reason: err.Error()}
+		}
+		return RiskCheckResult{Approved: true}
 	}
 
 	// Check exposure limits
@@ -186,13 +248,13 @@ func (rm *RiskManager) checkDailyVolume(order *Order) RiskCheckResult {
 
 // checkExposure checks if exposure limits are exceeded
 func (rm *RiskManager) checkExposure(order *Order) RiskCheckResult {
-	rm.clientMu.RLock()
+	rm.accountMu.RLock()
 	client, exists := rm.clients[order.ClientID]
 	if exists {
 		copied := *client
 		client = &copied
 	}
-	rm.clientMu.RUnlock()
+	rm.accountMu.RUnlock()
 
 	if !exists {
 		return RiskCheckResult{Approved: true, Reason: ""}
@@ -230,13 +292,13 @@ func (rm *RiskManager) checkExposure(order *Order) RiskCheckResult {
 
 // checkCollateral checks if sufficient collateral is available
 func (rm *RiskManager) checkCollateral(order *Order) RiskCheckResult {
-	rm.clientMu.RLock()
+	rm.accountMu.RLock()
 	client, exists := rm.clients[order.ClientID]
 	if exists {
 		copied := *client
 		client = &copied
 	}
-	rm.clientMu.RUnlock()
+	rm.accountMu.RUnlock()
 
 	if !exists {
 		return RiskCheckResult{Approved: true, Reason: ""}
@@ -260,9 +322,15 @@ func (rm *RiskManager) checkCollateral(order *Order) RiskCheckResult {
 }
 
 // UpdatePosition updates client position after a trade
-func (rm *RiskManager) UpdatePosition(trade *Trade) {
-	rm.clientMu.Lock()
-	defer rm.clientMu.Unlock()
+func (rm *RiskManager) UpdatePosition(trade *Trade) error {
+	if rm.derivativesEnabled {
+		return ErrDerivativeTradeRequiresMatching
+	}
+	if trade == nil {
+		return ErrInvalidDerivativeTrade
+	}
+	rm.accountMu.Lock()
+	defer rm.accountMu.Unlock()
 
 	// Update bid client position
 	if bidClient, exists := rm.clients[trade.BidClient]; exists {
@@ -286,6 +354,7 @@ func (rm *RiskManager) UpdatePosition(trade *Trade) {
 	if volMap, exists := rm.dailyVolume[trade.AskClient]; exists {
 		volMap[trade.Symbol] += trade.Quantity
 	}
+	return nil
 }
 
 // CheckCircuitBreakerTrigger checks if a circuit breaker should be triggered
@@ -357,8 +426,8 @@ func (rm *RiskManager) checkCooldowns() {
 
 // GetClient returns a client by ID
 func (rm *RiskManager) GetClient(clientID uuid.UUID) (*Client, bool) {
-	rm.clientMu.RLock()
-	defer rm.clientMu.RUnlock()
+	rm.accountMu.RLock()
+	defer rm.accountMu.RUnlock()
 	client, exists := rm.clients[clientID]
 	if !exists {
 		return nil, false

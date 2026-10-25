@@ -43,9 +43,62 @@ Um motor de matching de ordens de alta performance em Go, projetado para latênc
 
 Essa entrada aceita novas ordens, não a restauração de ordens já parcialmente executadas. Fills parciais, ativações de stops e cópias de books continuam sendo processados internamente sem reaplicar a regra de nova submissão. Entrada válida ainda pode receber `ErrEngineClosed` ou `ErrBackpressure`; após aceitação na fila, duplicidade de ID ativo e risco continuam sendo verificados pelo loop.
 
+### Perfil de futuros com margem inicial
+
+`NewDerivativesMatchingEngine` cria um perfil financeiro separado da simulação educativa de `NewMatchingEngine`. O perfil inicial representa futuros simplificados, com contratos inteiros, posição líquida com sinal por cliente/instrumento e margem inicial fixa por contrato. Não há pagamento do valor nocional integral para abrir a posição.
+
+- Registre cada `DerivativeInstrument` com símbolo, `MarginCurrency` e `InitialMarginPerContract` positivo. A configuração é fixa neste incremento; registrar novamente o mesmo valor é idempotente.
+- Cadastre os clientes com `Collateral` e `MarginCurrency` correspondente. Clientes e instrumentos desconhecidos são rejeitados pelo risco, inclusive quando a entrada estrutural é válida.
+- `AddClient` agora retorna erro. Atualizações não podem reduzir a garantia abaixo da margem comprometida nem alterar sua moeda enquanto houver compromisso; também não reiniciam o volume diário. Use `ResetDailyVolume` para uma mudança explícita de período.
+- Para cada instrumento, a margem cobre a maior posição líquida alcançável entre `posição + compras pendentes` e `posição - vendas pendentes`. Uma ordem que fecha uma posição não libera a margem da posição antes de executar. Não há compensação entre instrumentos ou conversão de moedas.
+- Ordens limit, market e stops reservam margem pela quantidade de contratos. O preço opcional de market não define esse orçamento. Stops comprometem margem enquanto estão pendentes e mantêm a reserva ao ativar.
+- Fills convertem margem de ordens em margem de posição. Cancelamentos e rejeições do restante liberam somente o compromisso não executado; encerrar a posição libera sua margem. Autonegociação no mesmo cliente é recusada neste perfil, preservando a ordem passiva.
+- `RiskLimits.MaxOrderSize` e `MaxDailyVolume` continuam sendo aplicados. O volume de ordens pendentes entra no orçamento diário, e `MaxPositionSize > 0` limita a maior posição potencial por instrumento. `MaxExposure` pertence ao modelo legado de exposição nocional e não controla este perfil de margem fixa.
+- Quantidades e posições potenciais devem caber na faixa simétrica de `int64`; multiplicações e somas de margem são verificadas antes da reserva. Garantias e margens usam unidades inteiras da `MarginCurrency`. Um restante que não caiba no total do nível do book é rejeitado e sua reserva é liberada.
+- `GetDerivativePosition` e `GetMarginAccount` retornam valores independentes. Use esses métodos para o perfil financeiro; os campos globais legados `Client.Exposure`, `LongPosition` e `ShortPosition` não representam posições de derivativos.
+
+Exemplo de configuração dentro do pacote (com `fmt` e `github.com/google/uuid` importados):
+
+```go
+func derivativesExample() error {
+    engine := NewDerivativesMatchingEngine(1000, 1000)
+    defer engine.Close()
+    if err := engine.AddDerivativeInstrument(DerivativeInstrument{
+        Symbol: "SIM-FUT", MarginCurrency: "SIM", InitialMarginPerContract: 100,
+    }); err != nil {
+        return err
+    }
+    clientID := uuid.New()
+    if err := engine.GetRiskManager().AddClient(&Client{
+        ID: clientID, Collateral: 500, MarginCurrency: "SIM",
+    }); err != nil {
+        return err
+    }
+    order := &Order{
+        ID: uuid.New(), ClientID: clientID, Symbol: "SIM-FUT",
+        Side: Ask, Type: Limit, Price: 10000, Quantity: 2, Remaining: 2,
+    }
+    if err := engine.SubmitOrder(order); err != nil {
+        return err
+    }
+    stats := engine.GetStats()
+    position, _ := engine.GetRiskManager().GetDerivativePosition(clientID, "SIM-FUT")
+    account, _ := engine.GetRiskManager().GetMarginAccount(clientID)
+    fmt.Printf("Queued: %d, pending sells: %d, reserved margin: %d\n",
+        stats.OrdersProcessed, position.OpenSellContracts, account.OrderMargin)
+    return nil
+}
+```
+
+O exemplo usa uma unidade monetária fictícia. Antes de executar, a ordem de venda deixa dois contratos pendentes e compromete 200 unidades de margem, embora seu nocional seja maior que a garantia. Ao executar, a posição líquida passa a negativa. O retorno de `SubmitOrder` continua indicando aceitação na fila; aprovação financeira é posterior.
+
+Este incremento **não calcula P&L, ajuste diário, margem de manutenção, liquidação automática, multiplicador financeiro ou taxas**. A garantia não é atualizada por oscilações do preço. Portanto, ele não implementa a gestão completa de risco de futuros, opções ou uma clearing. Esses itens compõem a etapa 1b do [roadmap](ROADMAP.md). Atualizar limites afeta novas admissões, sem liquidar ou revalidar automaticamente ordens e posições existentes.
+
+No perfil de derivativos, `Close` continua imediato e sem flush: libera reservas das ordens pendentes e conserva a margem das posições já executadas. Não encerra posições nem garante a entrega dos trades ainda não publicados. Persistência e recuperação permanecem fora deste incremento.
+
 ### Modelo de Concorrência
 
-`SubmitOrder` copia a entrada antes de enfileirar o comando. O retorno confirma aceitação na fila, não execução; o objeto original não recebe alterações de status. Um ID já ativo no mesmo símbolo (no book ou em stops pendentes) é rejeitado no processamento; `OrderBook.AddOrder` ignora IDs já presentes. Isso protege o índice de cancelamento, sem oferecer deduplicação histórica de ordens concluídas. Cancelamentos e consultas aguardam o comando correspondente e observam os comandos anteriores na mesma fila. Chamadas simultâneas são ordenadas pelo recebimento no canal. O ticker de stops pertence ao próprio loop e executa os stops diretamente, sem enviar comandos ao próprio canal.
+`SubmitOrder` copia a entrada antes de enfileirar o comando. O retorno confirma aceitação na fila, não execução; o objeto original não recebe alterações de status. Um ID já ativo no mesmo símbolo (no book ou em stops pendentes) é rejeitado no processamento; `OrderBook.AddOrder` ignora IDs já presentes e ordens cujo restante faria a quantidade total do nível exceder `uint64`. Isso protege o índice de cancelamento, sem oferecer deduplicação histórica de ordens concluídas. Cancelamentos e consultas aguardam o comando correspondente e observam os comandos anteriores na mesma fila. Chamadas simultâneas são ordenadas pelo recebimento no canal. O ticker de stops pertence ao próprio loop e executa os stops diretamente, sem enviar comandos ao próprio canal.
 
 `GetOrderBook` retorna um book independente: suas mutações não alteram o motor e ele não acompanha alterações posteriores. `GetSnapshot` consulta o loop e devolve uma cópia profunda atualizada, inclusive após fills parciais. Books independentes protegem seus métodos públicos com um mutex; seus snapshots publicados usam `atomic.Pointer`, com cópia profunda na leitura. As consultas do motor não são lock-free nem zero-copy.
 
@@ -180,6 +233,10 @@ Order Matching Engine/
 ├── benchmark_test.go   # Benchmarks de performance
 └── README.md           # Documentação
 ```
+
+## Evolução do Projeto
+
+O [roadmap](ROADMAP.md) registra a relevância de mercado, lacunas atuais, decisões de domínio e critérios de conclusão para os próximos incrementos.
 
 ## Considerações de Produção
 
