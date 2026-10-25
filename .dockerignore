@@ -1,0 +1,16 @@
+**
+!Dockerfile
+!go.mod
+!go.sum
+!cmd/
+!cmd/order-server/
+!cmd/order-server/**
+!internal/
+!internal/**
+**/.env*
+**/*.env
+**/*.db
+**/*.db-*
+**/*.pem
+**/*.key
+**/secrets/**
