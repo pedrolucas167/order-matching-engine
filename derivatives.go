@@ -64,8 +64,8 @@ func (rm *RiskManager) addDerivativeInstrument(instrument DerivativeInstrument) 
 	if instrument.Symbol == "" || strings.TrimSpace(instrument.Symbol) != instrument.Symbol || instrument.MarginCurrency == "" || strings.TrimSpace(instrument.MarginCurrency) != instrument.MarginCurrency || instrument.InitialMarginPerContract == 0 {
 		return ErrInvalidDerivativeInstrument
 	}
-	rm.clientMu.Lock()
-	defer rm.clientMu.Unlock()
+	rm.accountMu.Lock()
+	defer rm.accountMu.Unlock()
 	if previous, exists := rm.derivativeInstruments[instrument.Symbol]; exists && previous != instrument {
 		return fmt.Errorf("%w: configured margin cannot be changed in this increment", ErrInvalidDerivativeInstrument)
 	}
@@ -228,8 +228,8 @@ func (rm *RiskManager) releaseDerivativeOrder(orderID uuid.UUID, symbol string) 
 	if !rm.derivativesEnabled {
 		return
 	}
-	rm.clientMu.Lock()
-	defer rm.clientMu.Unlock()
+	rm.accountMu.Lock()
+	defer rm.accountMu.Unlock()
 	rm.releaseDerivativeOrderLocked(derivativeOrderKey{Symbol: symbol, OrderID: orderID})
 }
 
@@ -252,8 +252,8 @@ func (rm *RiskManager) releasePendingDerivativeOrders() {
 	if !rm.derivativesEnabled {
 		return
 	}
-	rm.clientMu.Lock()
-	defer rm.clientMu.Unlock()
+	rm.accountMu.Lock()
+	defer rm.accountMu.Unlock()
 	for key := range rm.derivativeReservations {
 		rm.releaseDerivativeOrderLocked(key)
 	}
@@ -269,8 +269,8 @@ func (rm *RiskManager) settleTrade(trade *Trade) error {
 	if trade.BidClient == trade.AskClient {
 		return ErrDerivativeSelfTrade
 	}
-	rm.clientMu.Lock()
-	defer rm.clientMu.Unlock()
+	rm.accountMu.Lock()
+	defer rm.accountMu.Unlock()
 	bidKey := derivativeOrderKey{Symbol: trade.Symbol, OrderID: trade.BidOrder}
 	askKey := derivativeOrderKey{Symbol: trade.Symbol, OrderID: trade.AskOrder}
 	bidReservation, bidExists := rm.derivativeReservations[bidKey]
@@ -324,8 +324,8 @@ func (rm *RiskManager) settleTrade(trade *Trade) error {
 }
 
 func (rm *RiskManager) GetDerivativePosition(clientID uuid.UUID, symbol string) (DerivativePosition, bool) {
-	rm.clientMu.RLock()
-	defer rm.clientMu.RUnlock()
+	rm.accountMu.RLock()
+	defer rm.accountMu.RUnlock()
 	position, exists := rm.derivativePositions[clientID][symbol]
 	return position, exists
 }
@@ -334,8 +334,8 @@ func (rm *RiskManager) GetMarginAccount(clientID uuid.UUID) (MarginAccount, bool
 	if !rm.derivativesEnabled {
 		return MarginAccount{}, false
 	}
-	rm.clientMu.RLock()
-	defer rm.clientMu.RUnlock()
+	rm.accountMu.RLock()
+	defer rm.accountMu.RUnlock()
 	account, err := rm.calculateMarginAccountLocked(clientID, "", nil)
 	return account, err == nil
 }

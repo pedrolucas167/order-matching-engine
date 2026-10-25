@@ -291,3 +291,54 @@ func TestDerivativeRegistrationRequiresCurrencyAndPreservesVolume(t *testing.T) 
 		t.Fatal("updating collateral reset daily volume")
 	}
 }
+
+func TestClosingDerivativeOrdersCannotSpendUnreleasedPositionMargin(t *testing.T) {
+	manager, buyer, seller := newDerivativeRiskTest(t, 100, 200)
+	bid, ask := derivativeTestOrder(buyer, Bid, 2), derivativeTestOrder(seller, Ask, 2)
+	reserveDerivativeTestOrder(t, manager, bid)
+	reserveDerivativeTestOrder(t, manager, ask)
+	if err := manager.settleTrade(&Trade{Symbol: "SIM-FUT", Price: 10000, Quantity: 2, BidOrder: bid.ID, AskOrder: ask.ID, BidClient: buyer, AskClient: seller}); err != nil {
+		t.Fatal(err)
+	}
+	closing := derivativeTestOrder(buyer, Ask, 2)
+	reserveDerivativeTestOrder(t, manager, closing)
+	account, _ := manager.GetMarginAccount(buyer)
+	if account.PositionMargin != 200 || account.OrderMargin != 0 || account.AvailableCollateral != 0 {
+		t.Fatalf("closing order released position margin before a fill: %+v", account)
+	}
+	if result := manager.checkAndReserveOrder(derivativeTestOrder(buyer, Bid, 1)); result.Approved {
+		t.Fatal("opening order spent margin from an unfilled closing order")
+	}
+	manager.releaseDerivativeOrder(closing.ID, closing.Symbol)
+	account, _ = manager.GetMarginAccount(buyer)
+	if account.PositionMargin != 200 || account.AvailableCollateral != 0 {
+		t.Fatal("cancelling a closing order released position margin")
+	}
+}
+
+func TestDerivativeTradeCanCloseAndReversePositions(t *testing.T) {
+	manager, buyer, seller := newDerivativeRiskTest(t, 100, 200)
+	bid, ask := derivativeTestOrder(buyer, Bid, 1), derivativeTestOrder(seller, Ask, 1)
+	reserveDerivativeTestOrder(t, manager, bid)
+	reserveDerivativeTestOrder(t, manager, ask)
+	if err := manager.settleTrade(&Trade{Symbol: "SIM-FUT", Price: 10000, Quantity: 1, BidOrder: bid.ID, AskOrder: ask.ID, BidClient: buyer, AskClient: seller}); err != nil {
+		t.Fatal(err)
+	}
+	reverseBid, reverseAsk := derivativeTestOrder(seller, Bid, 3), derivativeTestOrder(buyer, Ask, 3)
+	reserveDerivativeTestOrder(t, manager, reverseBid)
+	reserveDerivativeTestOrder(t, manager, reverseAsk)
+	if err := manager.settleTrade(&Trade{Symbol: "SIM-FUT", Price: 10000, Quantity: 3, BidOrder: reverseBid.ID, AskOrder: reverseAsk.ID, BidClient: seller, AskClient: buyer}); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := manager.GetDerivativePosition(buyer, "SIM-FUT")
+	second, _ := manager.GetDerivativePosition(seller, "SIM-FUT")
+	if first.NetContracts != -2 || second.NetContracts != 2 {
+		t.Fatalf("positions did not reverse: %+v %+v", first, second)
+	}
+	for _, id := range []uuid.UUID{buyer, seller} {
+		account, _ := manager.GetMarginAccount(id)
+		if account.PositionMargin != 200 || account.OrderMargin != 0 || account.AvailableCollateral != 0 {
+			t.Fatalf("reversal margin: %+v", account)
+		}
+	}
+}

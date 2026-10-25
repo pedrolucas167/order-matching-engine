@@ -27,10 +27,18 @@ type MatchingEngine struct {
 }
 
 func NewMatchingEngine(orderBufferSize, tradeBufferSize int) *MatchingEngine {
+	return newMatchingEngine(orderBufferSize, tradeBufferSize, false)
+}
+
+func NewDerivativesMatchingEngine(orderBufferSize, tradeBufferSize int) *MatchingEngine {
+	return newMatchingEngine(orderBufferSize, tradeBufferSize, true)
+}
+
+func newMatchingEngine(orderBufferSize, tradeBufferSize int, derivativesEnabled bool) *MatchingEngine {
 	me := &MatchingEngine{
 		books:       make(map[string]*OrderBook),
 		stopOrders:  make(map[string][]*Order),
-		riskManager: NewRiskManager(),
+		riskManager: newRiskManager(derivativesEnabled),
 		tradeChan:   make(chan *Trade, tradeBufferSize),
 		commandChan: make(chan func(), orderBufferSize),
 		stop:        make(chan struct{}),
@@ -42,6 +50,14 @@ func NewMatchingEngine(orderBufferSize, tradeBufferSize int) *MatchingEngine {
 	}
 	go me.matchingLoop()
 	return me
+}
+
+func (me *MatchingEngine) AddDerivativeInstrument(instrument DerivativeInstrument) error {
+	var result error
+	if !me.runCommand(func() { result = me.riskManager.addDerivativeInstrument(instrument) }) {
+		return ErrEngineClosed
+	}
+	return result
 }
 
 func (me *MatchingEngine) SubmitOrder(order *Order) error {
@@ -97,6 +113,7 @@ func (me *MatchingEngine) matchingLoop() {
 	defer close(me.done)
 	defer close(me.tradeChan)
 	defer me.riskManager.Close()
+	defer me.riskManager.releasePendingDerivativeOrders()
 	for {
 		select {
 		case <-me.stop:
@@ -131,11 +148,13 @@ func (me *MatchingEngine) processOrder(order *Order) {
 		return
 	}
 	// Perform risk checks before processing
-	riskResult := me.riskManager.CheckOrder(order)
+	riskResult := me.riskManager.checkAndReserveOrder(order)
 	if !riskResult.Approved {
 		order.Status = Rejected
 		return
 	}
+
+	defer me.releaseCompletedOrderReservation(order)
 
 	// Get or create order book for symbol
 	book := me.getOrCreateBook(order.Symbol)
@@ -179,6 +198,9 @@ func (me *MatchingEngine) matchMarketOrder(book *OrderBook, order *Order) {
 	}
 
 	// If order not fully filled, reject remaining
+	if order.Status == Rejected {
+		return
+	}
 	if order.Remaining > 0 {
 		order.Status = Rejected
 	} else {
@@ -195,6 +217,9 @@ func (me *MatchingEngine) matchLimitOrder(book *OrderBook, order *Order) {
 	}
 
 	// If order not fully filled, add to book
+	if order.Status == Rejected {
+		return
+	}
 	if order.Remaining > 0 {
 		order.Status = Open
 		if order.Remaining < order.Quantity {
@@ -206,207 +231,109 @@ func (me *MatchingEngine) matchLimitOrder(book *OrderBook, order *Order) {
 	}
 }
 
-// matchBidLimit matches a buy limit order against asks
 func (me *MatchingEngine) matchBidLimit(book *OrderBook, order *Order) {
 	for order.Remaining > 0 {
-		bestAsk := book.getBestAsk()
-		if bestAsk == nil || bestAsk.Price > order.Price {
-			break // No matching ask at acceptable price
+		level := book.getBestAsk()
+		if level == nil || level.Price > order.Price {
+			return
 		}
-
-		// Match against orders at this price level (FIFO)
-		for _, askOrder := range append([]*Order(nil), bestAsk.Orders...) {
-			if order.Remaining == 0 {
-				break
+		for _, resting := range append([]*Order(nil), level.Orders...) {
+			quantity := min(order.Remaining, resting.Remaining)
+			if quantity > 0 && !me.executeTrade(book, order, resting, level, quantity) {
+				return
 			}
-
-			tradeQty := min(order.Remaining, askOrder.Remaining)
-			if tradeQty > 0 {
-				// Execute trade
-				trade := &Trade{
-					ID:        uuid.New(),
-					Symbol:    book.symbol,
-					Price:     bestAsk.Price,
-					Quantity:  tradeQty,
-					BidOrder:  order.ID,
-					AskOrder:  askOrder.ID,
-					BidClient: order.ClientID,
-					AskClient: askOrder.ClientID,
-					Timestamp: time.Now().UnixNano(),
-				}
-
-				// Update order quantities
-				order.Remaining -= tradeQty
-				askOrder.Remaining -= tradeQty
-				bestAsk.TotalQty -= tradeQty
-
-				// Update ask order status
-				if askOrder.Remaining == 0 {
-					askOrder.Status = Filled
-					book.removeOrder(askOrder.ID)
-				} else {
-					askOrder.Status = PartialFilled
-				}
-
-				// Update risk manager with position changes
-				me.riskManager.UpdatePosition(trade)
-
-				// Check circuit breaker trigger
-				me.riskManager.CheckCircuitBreakerTrigger(book.symbol, bestAsk.Price)
-
-				// Publish trade
-				me.publishTrade(trade)
+			if order.Remaining == 0 {
+				return
 			}
 		}
 	}
 }
 
-// matchAskLimit matches a sell limit order against bids
 func (me *MatchingEngine) matchAskLimit(book *OrderBook, order *Order) {
 	for order.Remaining > 0 {
-		bestBid := book.getBestBid()
-		if bestBid == nil || bestBid.Price < order.Price {
-			break // No matching bid at acceptable price
+		level := book.getBestBid()
+		if level == nil || level.Price < order.Price {
+			return
 		}
-
-		// Match against orders at this price level (FIFO)
-		for _, bidOrder := range append([]*Order(nil), bestBid.Orders...) {
-			if order.Remaining == 0 {
-				break
+		for _, resting := range append([]*Order(nil), level.Orders...) {
+			quantity := min(order.Remaining, resting.Remaining)
+			if quantity > 0 && !me.executeTrade(book, order, resting, level, quantity) {
+				return
 			}
-
-			tradeQty := min(order.Remaining, bidOrder.Remaining)
-			if tradeQty > 0 {
-				// Execute trade
-				trade := &Trade{
-					ID:        uuid.New(),
-					Symbol:    book.symbol,
-					Price:     bestBid.Price,
-					Quantity:  tradeQty,
-					BidOrder:  bidOrder.ID,
-					AskOrder:  order.ID,
-					BidClient: bidOrder.ClientID,
-					AskClient: order.ClientID,
-					Timestamp: time.Now().UnixNano(),
-				}
-
-				// Update order quantities
-				order.Remaining -= tradeQty
-				bidOrder.Remaining -= tradeQty
-				bestBid.TotalQty -= tradeQty
-
-				// Update bid order status
-				if bidOrder.Remaining == 0 {
-					bidOrder.Status = Filled
-					book.removeOrder(bidOrder.ID)
-				} else {
-					bidOrder.Status = PartialFilled
-				}
-
-				// Update risk manager with position changes
-				me.riskManager.UpdatePosition(trade)
-
-				// Check circuit breaker trigger
-				me.riskManager.CheckCircuitBreakerTrigger(book.symbol, bestBid.Price)
-
-				// Publish trade
-				me.publishTrade(trade)
+			if order.Remaining == 0 {
+				return
 			}
 		}
 	}
 }
 
-// matchBidMarket matches a buy market order against asks
 func (me *MatchingEngine) matchBidMarket(book *OrderBook, order *Order) {
 	for order.Remaining > 0 {
-		bestAsk := book.getBestAsk()
-		if bestAsk == nil {
-			break // No asks available
+		level := book.getBestAsk()
+		if level == nil {
+			return
 		}
-
-		// Match against orders at this price level (FIFO)
-		for _, askOrder := range append([]*Order(nil), bestAsk.Orders...) {
-			if order.Remaining == 0 {
-				break
+		for _, resting := range append([]*Order(nil), level.Orders...) {
+			quantity := min(order.Remaining, resting.Remaining)
+			if quantity > 0 && !me.executeTrade(book, order, resting, level, quantity) {
+				return
 			}
-
-			tradeQty := min(order.Remaining, askOrder.Remaining)
-			if tradeQty > 0 {
-				trade := &Trade{
-					ID:        uuid.New(),
-					Symbol:    book.symbol,
-					Price:     bestAsk.Price,
-					Quantity:  tradeQty,
-					BidOrder:  order.ID,
-					AskOrder:  askOrder.ID,
-					BidClient: order.ClientID,
-					AskClient: askOrder.ClientID,
-					Timestamp: time.Now().UnixNano(),
-				}
-
-				order.Remaining -= tradeQty
-				askOrder.Remaining -= tradeQty
-				bestAsk.TotalQty -= tradeQty
-
-				if askOrder.Remaining == 0 {
-					askOrder.Status = Filled
-					book.removeOrder(askOrder.ID)
-				} else {
-					askOrder.Status = PartialFilled
-				}
-
-				me.riskManager.UpdatePosition(trade)
-				me.riskManager.CheckCircuitBreakerTrigger(book.symbol, bestAsk.Price)
-				me.publishTrade(trade)
+			if order.Remaining == 0 {
+				return
 			}
 		}
 	}
 }
 
-// matchAskMarket matches a sell market order against bids
 func (me *MatchingEngine) matchAskMarket(book *OrderBook, order *Order) {
 	for order.Remaining > 0 {
-		bestBid := book.getBestBid()
-		if bestBid == nil {
-			break // No bids available
+		level := book.getBestBid()
+		if level == nil {
+			return
 		}
-
-		// Match against orders at this price level (FIFO)
-		for _, bidOrder := range append([]*Order(nil), bestBid.Orders...) {
+		for _, resting := range append([]*Order(nil), level.Orders...) {
+			quantity := min(order.Remaining, resting.Remaining)
+			if quantity > 0 && !me.executeTrade(book, order, resting, level, quantity) {
+				return
+			}
 			if order.Remaining == 0 {
-				break
-			}
-
-			tradeQty := min(order.Remaining, bidOrder.Remaining)
-			if tradeQty > 0 {
-				trade := &Trade{
-					ID:        uuid.New(),
-					Symbol:    book.symbol,
-					Price:     bestBid.Price,
-					Quantity:  tradeQty,
-					BidOrder:  bidOrder.ID,
-					AskOrder:  order.ID,
-					BidClient: bidOrder.ClientID,
-					AskClient: order.ClientID,
-					Timestamp: time.Now().UnixNano(),
-				}
-
-				order.Remaining -= tradeQty
-				bidOrder.Remaining -= tradeQty
-				bestBid.TotalQty -= tradeQty
-
-				if bidOrder.Remaining == 0 {
-					bidOrder.Status = Filled
-					book.removeOrder(bidOrder.ID)
-				} else {
-					bidOrder.Status = PartialFilled
-				}
-
-				me.riskManager.UpdatePosition(trade)
-				me.riskManager.CheckCircuitBreakerTrigger(book.symbol, bestBid.Price)
-				me.publishTrade(trade)
+				return
 			}
 		}
+	}
+}
+
+func (me *MatchingEngine) executeTrade(book *OrderBook, incoming, resting *Order, level *PriceLevel, quantity uint64) bool {
+	bid, ask := incoming, resting
+	if incoming.Side == Ask {
+		bid, ask = resting, incoming
+	}
+	trade := &Trade{
+		ID: uuid.New(), Symbol: book.symbol, Price: level.Price, Quantity: quantity,
+		BidOrder: bid.ID, AskOrder: ask.ID, BidClient: bid.ClientID, AskClient: ask.ClientID,
+		Timestamp: time.Now().UnixNano(),
+	}
+	if err := me.riskManager.settleTrade(trade); err != nil {
+		incoming.Status = Rejected
+		return false
+	}
+	incoming.Remaining -= quantity
+	resting.Remaining -= quantity
+	level.TotalQty -= quantity
+	if resting.Remaining == 0 {
+		resting.Status = Filled
+		book.removeOrder(resting.ID)
+	} else {
+		resting.Status = PartialFilled
+	}
+	me.riskManager.CheckCircuitBreakerTrigger(book.symbol, level.Price)
+	me.publishTrade(trade)
+	return true
+}
+
+func (me *MatchingEngine) releaseCompletedOrderReservation(order *Order) {
+	if order.Status == Filled || order.Status == Rejected {
+		me.riskManager.releaseDerivativeOrder(order.ID, order.Symbol)
 	}
 }
 
@@ -467,6 +394,7 @@ func (me *MatchingEngine) CancelOrder(orderID uuid.UUID, symbol string) bool {
 		if book := me.books[symbol]; book != nil {
 			if order, exists := book.orders[orderID]; exists {
 				order.Status = Cancelled
+				me.riskManager.releaseDerivativeOrder(orderID, symbol)
 				book.removeOrder(orderID)
 				cancelled = true
 			}
@@ -570,6 +498,7 @@ func (me *MatchingEngine) processStopOrdersForSymbol(symbol string) {
 }
 
 func (me *MatchingEngine) triggerStopOrder(order *Order) {
+	defer me.releaseCompletedOrderReservation(order)
 	order.Timestamp = time.Now().UnixNano()
 	book := me.getOrCreateBook(order.Symbol)
 	if order.Type == StopMarket {
@@ -599,6 +528,7 @@ func (me *MatchingEngine) cancelStopOrder(orderID uuid.UUID, symbol string) bool
 	for i, order := range orders {
 		if order.ID == orderID && order.Status == Pending {
 			order.Status = Cancelled
+			me.riskManager.releaseDerivativeOrder(orderID, symbol)
 			// Remove from list
 			me.stopOrders[symbol] = append(orders[:i], orders[i+1:]...)
 			return true

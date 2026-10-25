@@ -18,7 +18,7 @@ type RiskManager struct {
 	done                   chan struct{}
 	closeOnce              sync.Once
 	clients                map[uuid.UUID]*Client
-	clientMu               sync.RWMutex
+	accountMu              sync.RWMutex
 	riskLimits             map[uuid.UUID]*RiskLimits
 	limitsMu               sync.RWMutex
 	circuitBreakers        map[string]*CircuitBreaker
@@ -69,8 +69,8 @@ func (rm *RiskManager) AddClient(client *Client) error {
 	if rm.derivativesEnabled && (copied.MarginCurrency == "" || strings.TrimSpace(copied.MarginCurrency) != copied.MarginCurrency) {
 		return ErrMarginCurrencyMismatch
 	}
-	rm.clientMu.Lock()
-	defer rm.clientMu.Unlock()
+	rm.accountMu.Lock()
+	defer rm.accountMu.Unlock()
 	if rm.derivativesEnabled {
 		account, err := rm.calculateMarginAccountLocked(copied.ID, "", nil)
 		if err != nil && !errors.Is(err, ErrClientNotFound) {
@@ -143,9 +143,9 @@ func (rm *RiskManager) checkOrder(order *Order, reserve bool) RiskCheckResult {
 	}
 
 	if rm.derivativesEnabled {
-		rm.clientMu.Lock()
+		rm.accountMu.Lock()
 		err := rm.checkDerivativeOrderLocked(order, reserve)
-		rm.clientMu.Unlock()
+		rm.accountMu.Unlock()
 		if err != nil {
 			rm.statsMu.Lock()
 			rm.statistics.OrdersRejected++
@@ -248,13 +248,13 @@ func (rm *RiskManager) checkDailyVolume(order *Order) RiskCheckResult {
 
 // checkExposure checks if exposure limits are exceeded
 func (rm *RiskManager) checkExposure(order *Order) RiskCheckResult {
-	rm.clientMu.RLock()
+	rm.accountMu.RLock()
 	client, exists := rm.clients[order.ClientID]
 	if exists {
 		copied := *client
 		client = &copied
 	}
-	rm.clientMu.RUnlock()
+	rm.accountMu.RUnlock()
 
 	if !exists {
 		return RiskCheckResult{Approved: true, Reason: ""}
@@ -292,13 +292,13 @@ func (rm *RiskManager) checkExposure(order *Order) RiskCheckResult {
 
 // checkCollateral checks if sufficient collateral is available
 func (rm *RiskManager) checkCollateral(order *Order) RiskCheckResult {
-	rm.clientMu.RLock()
+	rm.accountMu.RLock()
 	client, exists := rm.clients[order.ClientID]
 	if exists {
 		copied := *client
 		client = &copied
 	}
-	rm.clientMu.RUnlock()
+	rm.accountMu.RUnlock()
 
 	if !exists {
 		return RiskCheckResult{Approved: true, Reason: ""}
@@ -329,8 +329,8 @@ func (rm *RiskManager) UpdatePosition(trade *Trade) error {
 	if trade == nil {
 		return ErrInvalidDerivativeTrade
 	}
-	rm.clientMu.Lock()
-	defer rm.clientMu.Unlock()
+	rm.accountMu.Lock()
+	defer rm.accountMu.Unlock()
 
 	// Update bid client position
 	if bidClient, exists := rm.clients[trade.BidClient]; exists {
@@ -426,8 +426,8 @@ func (rm *RiskManager) checkCooldowns() {
 
 // GetClient returns a client by ID
 func (rm *RiskManager) GetClient(clientID uuid.UUID) (*Client, bool) {
-	rm.clientMu.RLock()
-	defer rm.clientMu.RUnlock()
+	rm.accountMu.RLock()
+	defer rm.accountMu.RUnlock()
 	client, exists := rm.clients[clientID]
 	if !exists {
 		return nil, false
