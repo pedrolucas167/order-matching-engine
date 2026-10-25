@@ -24,6 +24,8 @@ type MatchingEngine struct {
 	tradeBacklogLimit int64
 	tradesProcessed   atomic.Uint64
 	ordersProcessed   atomic.Uint64
+	priceFeeds        map[string]*priceFeedState
+	markTimes         map[string]time.Time
 }
 
 func NewMatchingEngine(orderBufferSize, tradeBufferSize int) *MatchingEngine {
@@ -43,6 +45,8 @@ func newMatchingEngine(orderBufferSize, tradeBufferSize int, derivativesEnabled 
 		commandChan: make(chan func(), orderBufferSize),
 		stop:        make(chan struct{}),
 		done:        make(chan struct{}),
+		priceFeeds:  make(map[string]*priceFeedState),
+		markTimes:   make(map[string]time.Time),
 	}
 	me.tradeBacklogLimit = int64(tradeBufferSize)
 	if me.tradeBacklogLimit < 1 {
@@ -63,8 +67,13 @@ func (me *MatchingEngine) AddDerivativeInstrument(instrument DerivativeInstrumen
 func (me *MatchingEngine) SetDerivativeMarkPrice(symbol string, price uint64) error {
 	var result error
 	if !me.runCommand(func() {
+		if me.priceFeeds[symbol] != nil {
+			result = ErrPriceFeedOwnsMark
+			return
+		}
 		result = me.riskManager.setDerivativeMarkPrice(symbol, price)
 		if result == nil {
+			me.markTimes[symbol] = time.Now()
 			me.cancelUndermarginedOrders()
 		}
 	}) {
@@ -76,8 +85,13 @@ func (me *MatchingEngine) SetDerivativeMarkPrice(symbol string, price uint64) er
 func (me *MatchingEngine) SettleDerivativeInstrument(symbol string, price uint64) error {
 	var result error
 	if !me.runCommand(func() {
+		if me.priceFeeds[symbol] != nil {
+			result = ErrPriceFeedOwnsMark
+			return
+		}
 		result = me.riskManager.settleDerivativeInstrument(symbol, price)
 		if result == nil {
+			me.markTimes[symbol] = time.Now()
 			me.cancelUndermarginedOrders()
 		}
 	}) {
@@ -156,8 +170,10 @@ func (me *MatchingEngine) matchingLoop() {
 		case <-me.stop:
 			return
 		case command := <-me.commandChan:
+			me.expirePriceFeeds()
 			command()
 		case <-ticker.C:
+			me.expirePriceFeeds()
 			me.checkAndTriggerStopOrders()
 		case output <- next:
 			me.pendingTrades[0] = nil
@@ -169,6 +185,10 @@ func (me *MatchingEngine) matchingLoop() {
 
 // processOrder handles a single order
 func (me *MatchingEngine) processOrder(order *Order) {
+	if !me.priceFeedReady(order.Symbol) || !me.accountPriceFeedsReady(order.ClientID) {
+		order.Status = Rejected
+		return
+	}
 	if me.hasActiveOrder(order.ID, order.Symbol) {
 		order.Status = Rejected
 		return
@@ -590,6 +610,10 @@ func (me *MatchingEngine) cancelUndermarginedOrders() {
 		return
 	}
 	accounts := me.riskManager.accountsWithMarginShortfall()
+	me.cancelAccountOrders(accounts)
+}
+
+func (me *MatchingEngine) cancelAccountOrders(accounts map[uuid.UUID]bool) {
 	if len(accounts) == 0 {
 		return
 	}
