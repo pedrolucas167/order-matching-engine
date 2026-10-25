@@ -13,6 +13,7 @@ func main() {
 	fmt.Println()
 
 	engine := NewMatchingEngine(10000, 10000)
+	defer engine.Close()
 
 	symbol := "BTC-USD"
 
@@ -182,6 +183,7 @@ func main() {
 	fmt.Println("  Setting up market with BTC at $50.00...")
 
 	engine2 := NewMatchingEngine(10000, 10000)
+	defer engine2.Close()
 	symbol2 := "ETH-USD"
 
 	go func() {
@@ -250,7 +252,7 @@ func main() {
 			Type:      Limit,
 			Price:     49000000,
 			Quantity:  100,
-			Remaining:  100,
+			Remaining: 100,
 			Timestamp: time.Now().UnixNano(),
 		}
 		engine2.SubmitOrder(ask)
@@ -269,6 +271,7 @@ func main() {
 
 	fmt.Println("\nScenario 7: Risk Management Demo...")
 	engine3 := NewMatchingEngine(10000, 10000)
+	defer engine3.Close()
 	symbol3 := "PETR4-USD"
 
 	go func() {
@@ -287,20 +290,20 @@ func main() {
 	riskManager := engine3.GetRiskManager()
 
 	client1 := &Client{
-		ID:           client1ID,
-		Name:         "Client A - High Risk",
-		Collateral:   10000000000,
-		Exposure:     0,
-		LongPosition: 0,
+		ID:            client1ID,
+		Name:          "Client A - High Risk",
+		Collateral:    10000000000,
+		Exposure:      0,
+		LongPosition:  0,
 		ShortPosition: 0,
 	}
 
 	client2 := &Client{
-		ID:           client2ID,
-		Name:         "Client B - Conservative",
-		Collateral:   10000000000,
-		Exposure:     0,
-		LongPosition: 0,
+		ID:            client2ID,
+		Name:          "Client B - Conservative",
+		Collateral:    10000000000,
+		Exposure:      0,
+		LongPosition:  0,
 		ShortPosition: 0,
 	}
 
