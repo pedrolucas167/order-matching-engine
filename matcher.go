@@ -60,6 +60,32 @@ func (me *MatchingEngine) AddDerivativeInstrument(instrument DerivativeInstrumen
 	return result
 }
 
+func (me *MatchingEngine) SetDerivativeMarkPrice(symbol string, price uint64) error {
+	var result error
+	if !me.runCommand(func() {
+		result = me.riskManager.setDerivativeMarkPrice(symbol, price)
+		if result == nil {
+			me.cancelUndermarginedOrders()
+		}
+	}) {
+		return ErrEngineClosed
+	}
+	return result
+}
+
+func (me *MatchingEngine) SettleDerivativeInstrument(symbol string, price uint64) error {
+	var result error
+	if !me.runCommand(func() {
+		result = me.riskManager.settleDerivativeInstrument(symbol, price)
+		if result == nil {
+			me.cancelUndermarginedOrders()
+		}
+	}) {
+		return ErrEngineClosed
+	}
+	return result
+}
+
 func (me *MatchingEngine) SubmitOrder(order *Order) error {
 	if order == nil {
 		return fmt.Errorf("%w: order is nil", ErrInvalidOrder)
@@ -154,6 +180,7 @@ func (me *MatchingEngine) processOrder(order *Order) {
 		return
 	}
 
+	defer me.cancelUndermarginedOrders()
 	defer me.releaseCompletedOrderReservation(order)
 
 	// Get or create order book for symbol
@@ -446,6 +473,7 @@ func (me *MatchingEngine) checkAndTriggerStopOrders() {
 	for _, symbol := range symbols {
 		me.processStopOrdersForSymbol(symbol)
 	}
+	me.cancelUndermarginedOrders()
 }
 
 // processStopOrdersForSymbol processes stop orders for a specific symbol
@@ -555,4 +583,35 @@ func (me *MatchingEngine) CancelStopOrder(orderID uuid.UUID, symbol string) bool
 	cancelled := false
 	me.runCommand(func() { cancelled = me.cancelStopOrder(orderID, symbol) })
 	return cancelled
+}
+
+func (me *MatchingEngine) cancelUndermarginedOrders() {
+	if !me.riskManager.derivativesEnabled {
+		return
+	}
+	accounts := me.riskManager.accountsWithMarginShortfall()
+	if len(accounts) == 0 {
+		return
+	}
+	for symbol, book := range me.books {
+		for id, order := range book.orders {
+			if accounts[order.ClientID] {
+				order.Status = Cancelled
+				me.riskManager.releaseDerivativeOrder(id, symbol)
+				book.removeOrder(id)
+			}
+		}
+	}
+	for symbol, orders := range me.stopOrders {
+		remaining := make([]*Order, 0, len(orders))
+		for _, order := range orders {
+			if accounts[order.ClientID] {
+				order.Status = Cancelled
+				me.riskManager.releaseDerivativeOrder(order.ID, symbol)
+			} else {
+				remaining = append(remaining, order)
+			}
+		}
+		me.stopOrders[symbol] = remaining
+	}
 }

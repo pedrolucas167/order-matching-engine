@@ -49,7 +49,7 @@ Essa entrada aceita novas ordens, não a restauração de ordens já parcialment
 
 - Registre cada `DerivativeInstrument` com símbolo, `MarginCurrency` e `InitialMarginPerContract` positivo. A configuração é fixa neste incremento; registrar novamente o mesmo valor é idempotente.
 - Cadastre os clientes com `Collateral` e `MarginCurrency` correspondente. Clientes e instrumentos desconhecidos são rejeitados pelo risco, inclusive quando a entrada estrutural é válida.
-- `AddClient` agora retorna erro. Atualizações não podem reduzir a garantia abaixo da margem comprometida nem alterar sua moeda enquanto houver compromisso; também não reiniciam o volume diário. Use `ResetDailyVolume` para uma mudança explícita de período.
+- `AddClient` agora retorna erro. Atualizações de aporte não podem deixar o patrimônio abaixo da margem inicial exigida ao retirar recursos, e a moeda da conta é imutável; também não reiniciam o volume diário. Use `ResetDailyVolume` para uma mudança explícita de período.
 - Para cada instrumento, a margem cobre a maior posição líquida alcançável entre `posição + compras pendentes` e `posição - vendas pendentes`. Uma ordem que fecha uma posição não libera a margem da posição antes de executar. Não há compensação entre instrumentos ou conversão de moedas.
 - Ordens limit, market e stops reservam margem pela quantidade de contratos. O preço opcional de market não define esse orçamento. Stops comprometem margem enquanto estão pendentes e mantêm a reserva ao ativar.
 - Fills convertem margem de ordens em margem de posição. Cancelamentos e rejeições do restante liberam somente o compromisso não executado; encerrar a posição libera sua margem. Autonegociação no mesmo cliente é recusada neste perfil, preservando a ordem passiva.
@@ -92,9 +92,28 @@ func derivativesExample() error {
 
 O exemplo usa uma unidade monetária fictícia. Antes de executar, a ordem de venda deixa dois contratos pendentes e compromete 200 unidades de margem, embora seu nocional seja maior que a garantia. Ao executar, a posição líquida passa a negativa. O retorno de `SubmitOrder` continua indicando aceitação na fila; aprovação financeira é posterior.
 
-Este incremento **não calcula P&L, ajuste diário, margem de manutenção, liquidação automática, multiplicador financeiro ou taxas**. A garantia não é atualizada por oscilações do preço. Portanto, ele não implementa a gestão completa de risco de futuros, opções ou uma clearing. Esses itens compõem a etapa 1b do [roadmap](ROADMAP.md). Atualizar limites afeta novas admissões, sem liquidar ou revalidar automaticamente ordens e posições existentes.
+O perfil também calcula P&L por FIFO, marcação e variação de liquidação conforme descrito abaixo. Ainda não implementa liquidação automática, taxas, modelos de carteira como SPAN, opções ou uma clearing. Atualizar limites de tamanho ou volume afeta novas admissões, sem liquidar posições automaticamente.
 
 No perfil de derivativos, `Close` continua imediato e sem flush: libera reservas das ordens pendentes e conserva a margem das posições já executadas. Não encerra posições nem garante a entrega dos trades ainda não publicados. Persistência e recuperação permanecem fora deste incremento.
+
+### P&L, marcação e margem de manutenção
+
+- `ContractMultiplier` define o valor monetário de cada unidade inteira de `Price`, por contrato; seu padrão é 1. Preços e margem precisam usar escalas compatíveis definidas pelo simulador. Não há ponto flutuante nem arredondamento de preço médio: o custo de entrada é mantido em lotes FIFO.
+- `MaintenanceMarginPerContract` deve ser positiva e não exceder a margem inicial. Se omitida, assume a margem inicial, preservando a configuração anterior sem inventar um percentual de bolsa.
+- `GetDerivativePosition` informa resultado realizado e não realizado; `GetDerivativeLots` devolve uma cópia dos lotes de entrada. Fechamentos parciais consomem os lotes mais antigos, e uma reversão abre o restante no preço do novo negócio.
+- A primeira execução fornece a marcação inicial do instrumento. Depois disso, ela **não acompanha automaticamente os trades**. `SetDerivativeMarkPrice(symbol, price)` atualiza a referência explicitamente, pelo loop do motor, e `GetDerivativeMarkPrice` permite consultá-la. Não há feed externo implementado.
+- `SettleDerivativeInstrument(symbol, settlementPrice)` simula a variação de liquidação: move o resultado não realizado para o realizado e redefine a base dos contratos ainda abertos nesse preço. Repetir o mesmo preço não credita ou debita o resultado duas vezes. A chamada é manual; não existe calendário ou execução diária automática.
+- `MarginAccount.Equity = Collateral + RealizedPnL + UnrealizedPnL`. `Collateral` representa o aporte-base administrado pelo simulador, e não é reescrito como lucro ou prejuízo. Não há protocolo bancário de depósitos, saques ou transferência para uma clearing.
+- Patrimônio e resultados monetários usam a faixa simétrica de `int64`. No perfil financeiro, aportes e margem comprometida devem caber em `MaxInt64`; o perfil educativo legado e os preços continuam com seus tipos anteriores. Intermediários de soma usam precisão inteira ampliada antes de validar o resultado final, evitando dependência da ordem de iteração dos instrumentos. Marcação ou liquidação que exceda a faixa é rejeitada integralmente, sem alterar contas, lotes ou referência.
+- `InitialMarginShortfall` e `MaintenanceMarginShortfall` mostram os déficits em relação às margens inicial e de manutenção. Patrimônio negativo continua visível, inclusive após encerrar uma posição; não há underflow nem perdão automático do saldo negativo.
+
+**Política conservadora de insuficiência:** após processar uma ordem, um lote de stops ou uma marcação/liquidação, o motor cancela todas as ordens e stops pendentes das contas cujo patrimônio não cobre a margem inicial exigida. A partir daí, somente uma ordem `Market` que reduza uma posição existente, sem ultrapassar sua quantidade e sem outras ordens pendentes nesse instrumento, pode ser aceita apesar do déficit. Esse fechamento não é bloqueado pelo limite diário de volume ou posição; limites operacionais de tamanho da ordem e circuit breaker continuam aplicáveis. Cancelamento e fechamento não apagam perdas.
+
+Ordens previamente admitidas são processadas como uma unidade pelo matching. Preços de execução distintos da marcação podem produzir déficit durante esse processamento; negócios já executados não são desfeitos. A política não promete impedir perdas por gaps e não substitui bandas de preço, liquidação ou modelos de risco de produção.
+
+`AddClient` pode atualizar o aporte-base: reforços são aceitos mesmo quando apenas reduzem o déficit; reduções são recusadas se o patrimônio resultante não cobrir a margem inicial. A moeda de uma conta cadastrada é imutável neste modelo. Nenhuma posição é liquidada automaticamente. O próximo incremento precisa definir essa política e sua relação com preços, liquidez, limites e recuperação durável.
+
+As premissas gerais de margem e variação são descritas pela [CME sobre marcação a mercado](https://www.cmegroup.com/education/courses/introduction-to-futures/mark-to-market) e pela [CME sobre margens inicial e de manutenção](https://www.cmegroup.com/solutions/risk-management/performance-bonds-margins/faq-performance-bonds-margins.html). Os parâmetros e a política implementados aqui são do simulador, sem promessa de conformidade integral com uma bolsa.
 
 ### Modelo de Concorrência
 

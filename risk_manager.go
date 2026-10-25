@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,8 @@ type RiskManager struct {
 	derivativeInstruments  map[string]DerivativeInstrument
 	derivativePositions    map[uuid.UUID]map[string]DerivativePosition
 	derivativeReservations map[derivativeOrderKey]derivativeReservation
+	derivativeLots         map[uuid.UUID]map[string][]DerivativeLot
+	derivativeMarks        map[string]uint64
 	stop                   chan struct{}
 	done                   chan struct{}
 	closeOnce              sync.Once
@@ -46,6 +49,8 @@ func newRiskManager(derivativesEnabled bool) *RiskManager {
 		derivativeInstruments:  make(map[string]DerivativeInstrument),
 		derivativePositions:    make(map[uuid.UUID]map[string]DerivativePosition),
 		derivativeReservations: make(map[derivativeOrderKey]derivativeReservation),
+		derivativeLots:         make(map[uuid.UUID]map[string][]DerivativeLot),
+		derivativeMarks:        make(map[string]uint64),
 		stop:                   make(chan struct{}),
 		done:                   make(chan struct{}),
 		clients:                make(map[uuid.UUID]*Client),
@@ -66,20 +71,29 @@ func (rm *RiskManager) AddClient(client *Client) error {
 		return ErrClientNotFound
 	}
 	copied := *client
+	if rm.derivativesEnabled && copied.Collateral > math.MaxInt64 {
+		return ErrRiskArithmeticOverflow
+	}
 	if rm.derivativesEnabled && (copied.MarginCurrency == "" || strings.TrimSpace(copied.MarginCurrency) != copied.MarginCurrency) {
 		return ErrMarginCurrencyMismatch
 	}
 	rm.accountMu.Lock()
 	defer rm.accountMu.Unlock()
 	if rm.derivativesEnabled {
-		account, err := rm.calculateMarginAccountLocked(copied.ID, "", nil)
+		account, err := rm.calculateMarginAccountLocked(copied.ID, "", nil, nil)
 		if err != nil && !errors.Is(err, ErrClientNotFound) {
 			return err
 		}
-		if account.PositionMargin+account.OrderMargin > copied.Collateral {
-			return ErrInsufficientMargin
+		if previous := rm.clients[copied.ID]; previous != nil {
+			candidateEquity, err := addMoney(account.Equity, int64(copied.Collateral)-int64(previous.Collateral))
+			if err != nil {
+				return err
+			}
+			if copied.Collateral < previous.Collateral && marginShortfall(account.PositionMargin+account.OrderMargin, candidateEquity) > 0 {
+				return ErrInsufficientMargin
+			}
 		}
-		if previous := rm.clients[copied.ID]; previous != nil && account.PositionMargin+account.OrderMargin > 0 && previous.MarginCurrency != copied.MarginCurrency {
+		if previous := rm.clients[copied.ID]; previous != nil && previous.MarginCurrency != copied.MarginCurrency {
 			return ErrMarginCurrencyMismatch
 		}
 	}
@@ -137,11 +151,6 @@ func (rm *RiskManager) checkOrder(order *Order, reserve bool) RiskCheckResult {
 		return sizeResult
 	}
 
-	// Check daily volume limits
-	if volumeResult := rm.checkDailyVolume(order); !volumeResult.Approved {
-		return volumeResult
-	}
-
 	if rm.derivativesEnabled {
 		rm.accountMu.Lock()
 		err := rm.checkDerivativeOrderLocked(order, reserve)
@@ -153,6 +162,11 @@ func (rm *RiskManager) checkOrder(order *Order, reserve bool) RiskCheckResult {
 			return RiskCheckResult{Reason: err.Error()}
 		}
 		return RiskCheckResult{Approved: true}
+	}
+
+	// Check daily volume limits
+	if volumeResult := rm.checkDailyVolume(order); !volumeResult.Approved {
+		return volumeResult
 	}
 
 	// Check exposure limits
